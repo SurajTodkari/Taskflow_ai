@@ -22,8 +22,32 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("taskflow")
 
+
+
+def _load_or_create_secret() -> str:
+    """Zero-config fallback: keep a random signing key in the database so it survives restarts."""
+    import secrets as _secrets
+    from sqlalchemy import text as _text
+    from .db import engine
+    with engine.begin() as con:
+        con.execute(_text("CREATE TABLE IF NOT EXISTS app_secrets (name VARCHAR(64) PRIMARY KEY, value TEXT NOT NULL)"))
+    for _ in range(2):
+        with engine.begin() as con:
+            row = con.execute(_text("SELECT value FROM app_secrets WHERE name='secret_key'")).first()
+            if row:
+                return row[0]
+            try:
+                con.execute(_text("INSERT INTO app_secrets (name, value) VALUES ('secret_key', :v)"),
+                            {"v": _secrets.token_urlsafe(48)})
+            except Exception:  # concurrent start inserted first; re-read
+                pass
+    raise RuntimeError("could not create SECRET_KEY")
+
+
 if os.environ.get("RENDER") and settings.SECRET_KEY.startswith("dev-secret"):
-    raise RuntimeError("SECRET_KEY is not set. Set a long random SECRET_KEY env var on this service.")
+    settings.SECRET_KEY = _load_or_create_secret()
+    logging.getLogger("taskflow").warning(
+        "SECRET_KEY env var not set: using a random key stored in the database. Set SECRET_KEY to manage it yourself.")
 if os.environ.get("RENDER") and settings.DATABASE_URL.startswith("sqlite"):
     log.error("DATABASE_URL is not set: using ephemeral SQLite. All users/tasks are LOST on every "
               "redeploy/restart. Create a Render Postgres and set DATABASE_URL on this service.")
