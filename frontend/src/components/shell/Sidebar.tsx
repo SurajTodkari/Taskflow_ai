@@ -2,30 +2,39 @@ import { LogoMark } from '../brand/Logo';
 import { useEffect, useRef } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
-import { CheckSquare, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react';
-import { NAV } from './nav';
+import { KanbanSquare, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
+import { NAV, JIRA_NAV, type NavItem } from './nav';
+import { jiraApi } from '../../lib/jiraApi';
 import { Tooltip } from '../ui/Tooltip';
 import { Avatar } from '../ui/Avatar';
 import type { User } from '../../lib/types';
 
 function Items({ collapsed, unread, onNavigate, idPrefix }: { collapsed: boolean; unread: number; onNavigate?: () => void; idPrefix: string }) {
+  const jira = useQuery({ queryKey: ['jira', 'projects'], queryFn: jiraApi.listProjects, staleTime: 30000, retry: false });
+  const jiraItems: NavItem[] = [...JIRA_NAV, ...(jira.data ?? []).slice(0, 8).map((p) => ({ to: `/jira/${p.key}`, label: p.name, icon: KanbanSquare }))];
+  const renderItem = ({ to, label, icon: Icon, end }: NavItem) => (
+    <Tooltip key={to} label={label} disabled={!collapsed}>
+      <NavLink to={to} end={end} onClick={onNavigate} aria-label={collapsed ? label : undefined}
+        className={({ isActive }) => `group relative flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${collapsed ? 'justify-center' : ''} ${isActive ? 'text-accent' : 'text-fg-muted hover:bg-surface-2 hover:text-fg'}`}>
+        {({ isActive }) => (<>
+          {isActive && <motion.span layoutId={`${idPrefix}-active`} className="absolute inset-0 rounded-lg bg-accent-soft" transition={{ type: 'spring', stiffness: 500, damping: 40 }}>
+            <span className="absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full bg-accent" /></motion.span>}
+          <span className="relative shrink-0"><Icon size={18} aria-hidden />
+            {to === '/notifications' && unread > 0 && collapsed && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-danger" />}</span>
+          {!collapsed && <span className="relative flex-1 truncate">{label}</span>}
+          {!collapsed && to === '/notifications' && unread > 0 && <span className="relative rounded-full bg-danger px-1.5 text-[10px] font-bold text-white">{unread > 99 ? '99+' : unread}</span>}
+        </>)}
+      </NavLink>
+    </Tooltip>
+  );
   return (
     <nav aria-label="Main" className="flex-1 space-y-0.5 overflow-y-auto overflow-x-hidden px-3 py-2">
-      {NAV.map(({ to, label, icon: Icon, end }) => (
-        <Tooltip key={to} label={label} disabled={!collapsed}>
-          <NavLink to={to} end={end} onClick={onNavigate} aria-label={collapsed ? label : undefined}
-            className={({ isActive }) => `group relative flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${collapsed ? 'justify-center' : ''} ${isActive ? 'text-accent' : 'text-fg-muted hover:bg-surface-2 hover:text-fg'}`}>
-            {({ isActive }) => (<>
-              {isActive && <motion.span layoutId={`${idPrefix}-active`} className="absolute inset-0 rounded-lg bg-accent-soft" transition={{ type: 'spring', stiffness: 500, damping: 40 }}>
-                <span className="absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full bg-accent" /></motion.span>}
-              <span className="relative shrink-0"><Icon size={18} aria-hidden />
-                {to === '/notifications' && unread > 0 && collapsed && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-danger" />}</span>
-              {!collapsed && <span className="relative flex-1 truncate">{label}</span>}
-              {!collapsed && to === '/notifications' && unread > 0 && <span className="relative rounded-full bg-danger px-1.5 text-[10px] font-bold text-white">{unread > 99 ? '99+' : unread}</span>}
-            </>)}
-          </NavLink>
-        </Tooltip>
-      ))}
+      {NAV.map(renderItem)}
+      <div className="pt-3" role="group" aria-label="Projects (Jira)">
+        {collapsed ? <div className="mx-3 mb-1 h-px bg-line" aria-hidden /> : <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-fg-muted">Projects (Jira)</p>}
+        {jiraItems.map(renderItem)}
+      </div>
     </nav>
   );
 }

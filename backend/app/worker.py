@@ -155,6 +155,25 @@ def run_once(db: Session, now: datetime | None = None) -> dict:
     return summary
 
 
+def start_background(interval: float = 60.0):
+    """Run run_once() every `interval` seconds in a daemon thread (free Render plan has no cron).
+    Returns a threading.Event; set it to stop. Failures are logged, never raised."""
+    import threading
+
+    stop = threading.Event()
+
+    def loop():
+        while not stop.wait(interval):
+            try:
+                with SessionLocal() as db:
+                    run_once(db)
+            except Exception:
+                log.exception("in-process worker iteration failed")
+
+    threading.Thread(target=loop, name="taskflow-worker", daemon=True).start()
+    return stop
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     with SessionLocal() as db:

@@ -1,6 +1,6 @@
 from datetime import date, datetime, time, timezone
 
-from sqlalchemy import (JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String,
+from sqlalchemy import (JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String,
                         Text, Time, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -244,3 +244,88 @@ class TimeEntry(TS, Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     seconds: Mapped[int] = mapped_column(Integer, default=0)
     __table_args__ = (Index("ix_time_user_start", "user_id", "started_at"),)
+
+
+# ---------------------------------------------------------------- Jira-style module
+class JiraProject(TS, Base):
+    __tablename__ = "jira_projects"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(10), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lead_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    issue_seq: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class JiraMember(TS, Base):
+    __tablename__ = "jira_members"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = fk_user()
+    role: Mapped[str] = mapped_column(String(10), default="member")  # admin | member | viewer
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_jira_member"),)
+
+
+class JiraColumn(TS, Base):
+    __tablename__ = "jira_columns"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(60))
+    category: Mapped[str] = mapped_column(String(15), default="todo")  # todo | in_progress | done
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class JiraSprint(TS, Base):
+    __tablename__ = "jira_sprints"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(String(10), default="planned")  # planned | active | closed
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class JiraIssue(TS, Base):
+    __tablename__ = "jira_issues"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_projects.id", ondelete="CASCADE"), index=True)
+    number: Mapped[int] = mapped_column(Integer)
+    type: Mapped[str] = mapped_column(String(10), default="task")
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    column_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_columns.id"), index=True)
+    priority: Mapped[str] = mapped_column(String(10), default="medium")
+    assignee_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                                    nullable=True, index=True)
+    reporter_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                                    nullable=True)
+    parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="SET NULL"),
+                                                  nullable=True, index=True)
+    sprint_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("jira_sprints.id", ondelete="SET NULL"),
+                                                  nullable=True, index=True)
+    story_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    labels: Mapped[list] = mapped_column(JSON, default=list)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    rank: Mapped[float] = mapped_column(Float, default=0.0)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (UniqueConstraint("project_id", "number", name="uq_jira_issue_number"),)
+
+
+class JiraComment(TS, Base):
+    __tablename__ = "jira_comments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = fk_user()
+    body: Mapped[str] = mapped_column(Text)
+
+
+class JiraHistory(TS, Base):
+    __tablename__ = "jira_history"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = fk_user()
+    field: Mapped[str] = mapped_column(String(40))
+    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)

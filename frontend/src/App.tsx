@@ -18,6 +18,14 @@ import AI from './pages/AI';
 import Settings from './pages/Settings';
 import Inbox from './pages/Inbox';
 import Landing from './pages/Landing';
+import JiraProjects from './pages/jira/JiraProjects';
+import MyIssues from './pages/jira/MyIssues';
+import ProjectLayout, { ProjectIndexRedirect } from './pages/jira/ProjectLayout';
+import Board from './pages/jira/Board';
+import Backlog from './pages/jira/Backlog';
+import Issues from './pages/jira/Issues';
+import Summary from './pages/jira/Summary';
+import ProjectSettings from './pages/jira/ProjectSettings';
 
 function Protected() {
   const { user, loading } = useAuth();
@@ -49,6 +57,17 @@ export default function App() {
         <Route path="/analytics" element={<Analytics />} />
         <Route path="/ai" element={<AI />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/jira" element={<JiraProjects />} />
+        <Route path="/jira/my-issues" element={<MyIssues />} />
+        <Route path="/jira/:key" element={<ProjectLayout />}>
+          <Route index element={<ProjectIndexRedirect />} />
+          <Route path="board" element={<Board />} />
+          <Route path="backlog" element={<Backlog />} />
+          <Route path="issues" element={<Issues />} />
+          <Route path="summary" element={<Summary />} />
+          <Route path="settings" element={<ProjectSettings />} />
+          <Route path="issue/:issueKey" element={null} />
+        </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

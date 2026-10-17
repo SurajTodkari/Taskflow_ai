@@ -256,3 +256,180 @@ class SettingsUpdate(BaseModel):
         if v is not None and any(d < 0 or d > 6 for d in v):
             raise ValueError("weekend_days values must be 0-6")
         return sorted(set(v)) if v is not None else v
+
+
+# ---------- jira-style module
+import re as _re  # noqa: E402
+
+JiraRole = Literal["admin", "member", "viewer"]
+JiraIssueType = Literal["epic", "story", "task", "bug", "subtask"]
+JiraPriority = Literal["highest", "high", "medium", "low", "lowest"]
+JiraCategory = Literal["todo", "in_progress", "done"]
+
+
+def _clean_labels(v):
+    if v is None:
+        return []
+    out = []
+    for x in v:
+        x = str(x).strip()
+        if not x:
+            continue
+        if len(x) > 40:
+            raise ValueError("label too long (max 40)")
+        if x not in out:
+            out.append(x)
+    if len(out) > 20:
+        raise ValueError("too many labels (max 20)")
+    return out
+
+
+class JiraProjectCreate(BaseModel):
+    key: str
+    name: str = Field(min_length=1, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=5000)
+
+    @field_validator("key")
+    @classmethod
+    def _key(cls, v):
+        v = v.strip().upper()
+        if not _re.fullmatch(r"[A-Z0-9]{2,10}", v):
+            raise ValueError("key must be 2-10 characters, A-Z and 0-9 only")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("name required")
+        return v
+
+
+class JiraProjectUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=5000)
+    lead_id: Optional[int] = None
+
+
+class JiraMemberAdd(BaseModel):
+    email: EmailStr
+    role: JiraRole = "member"
+
+
+class JiraMemberUpdate(BaseModel):
+    role: JiraRole
+
+
+class JiraColumnCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    category: JiraCategory = "todo"
+
+
+class JiraColumnUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    category: Optional[JiraCategory] = None
+    position: Optional[int] = Field(default=None, ge=0)
+
+
+class JiraIssueCreate(BaseModel):
+    type: JiraIssueType = "task"
+    title: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=50000)
+    column_id: Optional[int] = None
+    priority: JiraPriority = "medium"
+    assignee_id: Optional[int] = None
+    parent_id: Optional[int] = None
+    sprint_id: Optional[int] = None
+    story_points: Optional[int] = Field(default=None, ge=0, le=1000)
+    labels: list[str] = Field(default_factory=list)
+    due_date: Optional[date] = None
+
+    _labels = field_validator("labels")(_clean_labels)
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("title required")
+        return v
+
+
+class JiraIssueUpdate(BaseModel):
+    type: Optional[JiraIssueType] = None
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=50000)
+    column_id: Optional[int] = None
+    priority: Optional[JiraPriority] = None
+    assignee_id: Optional[int] = None
+    parent_id: Optional[int] = None
+    sprint_id: Optional[int] = None
+    story_points: Optional[int] = Field(default=None, ge=0, le=1000)
+    labels: Optional[list[str]] = None
+    due_date: Optional[date] = None
+
+    _labels = field_validator("labels")(_clean_labels)
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("title required")
+        return v
+
+
+class JiraMoveIn(BaseModel):
+    column_id: int
+    before_issue_id: Optional[int] = None
+    after_issue_id: Optional[int] = None
+
+
+class JiraRankIn(BaseModel):
+    sprint_id: Optional[int] = None
+    before_issue_id: Optional[int] = None
+    after_issue_id: Optional[int] = None
+
+
+class JiraCommentIn(BaseModel):
+    body: str = Field(min_length=1, max_length=20000)
+
+    @field_validator("body")
+    @classmethod
+    def _b(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError("body required")
+        return v
+
+
+class JiraSprintCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    goal: Optional[str] = Field(default=None, max_length=2000)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+    @model_validator(mode="after")
+    def _dates(self):
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        return self
+
+
+class JiraSprintUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    goal: Optional[str] = Field(default=None, max_length=2000)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+
+class JiraSprintStart(BaseModel):
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+
+class JiraSprintComplete(BaseModel):
+    move_open_to: str | int = "backlog"

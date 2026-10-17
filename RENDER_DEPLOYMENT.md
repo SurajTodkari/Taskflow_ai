@@ -1,49 +1,52 @@
-# Deploying TaskFlow AI to Render
+# Deploying TaskFlow AI to Render (free plan)
 
-**Nothing here is claimed to be deployed until you have a live URL and have completed the verification checklist below.** Render plans and pricing change; verify current details at https://render.com/pricing and https://render.com/docs before choosing plans.
+**Nothing here is claimed to be deployed until you have a live URL and have completed the verification checklist below.** Render plans and limits change; verify at https://render.com/pricing and https://render.com/docs.
 
-## Cost warnings (verify current pricing yourself)
-- Free web services spin down after inactivity (cold start of tens of seconds). Not suitable for reliable reminders on their own.
-- Free Postgres expires after a limited period (and has limits); use a paid database for real data.
-- **Cron jobs are paid-only** with a minimum monthly billing. The every-minute reminder worker needs one for push/reminders/summaries to work.
-- `preDeployCommand` may not be available on free web services; if not, run `alembic upgrade head` from the service Shell or add it to the build command.
-- File uploads: the default disk is ephemeral and wiped on deploy/restart. Use a persistent disk (paid) or object storage (S3-compatible) for attachments.
-- Static sites are free.
+## Architecture on the free plan
+- **One Docker web service** (`taskflow-api`) built from the root `Dockerfile`. It builds the React frontend and serves it together with the API from the same URL, so there is no separate static site and no CORS setup.
+- **Database: free external Postgres (Neon)**, not Render's. Render's own free Postgres expires after ~30 days, so it is not used.
+- **No cron service.** Free plans have no cron jobs, so the reminder / summary worker runs inside the API process: when `RUN_WORKER_IN_PROCESS=1` (set in `render.yaml`; it also defaults to on whenever Render's `RENDER` env var exists) a daemon thread runs the idempotent one-shot worker every 60 seconds. It is off for local dev and tests unless you set the variable.
+- Migrations run on every container start (`alembic upgrade head` in the Dockerfile `CMD`), including the Jira-style module (`0002_jira`).
+
+## Free-tier caveats (read these)
+- **Sleeps after ~15 minutes without traffic**; the first request afterwards takes tens of seconds to wake it. While the service sleeps the in-process worker is asleep too, so reminders, daily summaries and recurring-task generation are delayed until the next visit. Missed reminders fire when it wakes (they are idempotent). For reliable reminders keep the service awake (an external uptime pinger hitting `/health` every ~10 minutes) or move to a paid plan.
+- **Neon free tier** has storage/compute limits and its compute pauses when idle (first query after a pause is slower). Verify current limits at https://neon.tech/pricing. Do NOT use Render's free Postgres: it expires after ~30 days.
+- **Uploaded attachments are ephemeral**: the container disk is wiped on every deploy/restart/sleep-wake. Use a paid persistent disk or object storage for files you care about.
+- Memory is limited (512 MB); the app keeps dependencies light and runs a single process.
+- If `DATABASE_URL` is missing the app falls back to ephemeral SQLite and logs a loud error; always set `DATABASE_URL` to your Neon database.
 
 ## Steps
-1. **Source code**: Render deploys from a Git repository that you set up yourself. Make sure `.env` files are never included.
-2. **Create Blueprint**: Render Dashboard > New > Blueprint > select the repo. Render reads `render.yaml` and proposes: database `taskflow-db`, web `taskflow-api`, cron `taskflow-reminders`, static `taskflow-web`.
-3. **Database**: created by the Blueprint. `DATABASE_URL` is wired automatically to the API and cron job.
-4. **API**: build `pip install -r requirements.txt`, pre-deploy `alembic upgrade head`, start `uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"`, health check `/health`.
-5. **Static site**: build `npm ci && npm run build`, publish `dist`, rewrite `/*` to `/index.html`.
-6. **Environment variables** (prompted for `sync: false` ones):
-   - API: `CORS_ORIGINS` = your static site URL (exact origin, no trailing slash), `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (`mailto:...`), optional `ANTHROPIC_API_KEY`. `SECRET_KEY` is generated.
-   - Cron: same VAPID/Anthropic values and the **same `SECRET_KEY` as the API** (copy it from the API's env page).
-   - Static: `VITE_API_URL` = API URL, `VITE_VAPID_PUBLIC_KEY`. Changing these requires a rebuild/redeploy.
-   - Generate VAPID keys as described in README.md.
-7. **Cron**: `taskflow-reminders`, schedule `* * * * *`, command `python -m app.worker`. Confirm it is on a paid plan and check its logs after a few minutes.
-8. **Migrations**: run automatically via preDeployCommand. Manually: API service > Shell > `alembic upgrade head`.
-9. **Test auth**: open the static URL, register, log out, log in, reload (session persists via refresh token).
-10. **Test notifications**: Settings > enable notifications, allow the browser prompt, press the test notification button. Then create a task with a reminder 2 minutes ahead and watch for it (needs the cron job). On iOS, install to Home Screen first.
+0. **Create the free database**: sign up at https://neon.tech (no card), create a project, copy the connection string (`postgresql://...?sslmode=require`). You will paste it as `DATABASE_URL`.
+1. **Source code**: Render deploys from a Git repository you set up yourself. Make sure `.env` files are never committed.
+2. **Create Blueprint**: Render Dashboard > New > Blueprint > select the repo. Render reads `render.yaml` and proposes the Docker web service `taskflow-api`.
+3. **Environment variables** (prompted for `sync: false` ones; `SECRET_KEY` and `RUN_WORKER_IN_PROCESS` are set automatically):
+   - **Required:** `DATABASE_URL` = your Neon connection string.
+   - Optional: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (`mailto:...`) for push notifications (generate with `python backend/scripts/generate_vapid.py`), `ANTHROPIC_API_KEY` for AI features.
+   - `VITE_VAPID_PUBLIC_KEY` is a Docker build arg: if you use push, add it as a build-time env var so the frontend is built with it.
+4. **Deploy**: the first build takes a few minutes (it builds the frontend and installs Python deps).
+5. **Test auth**: open the service URL, register, log out, log in, reload (session persists via refresh token).
+6. **Test the Jira module**: open **Projects (Jira)**, create a project (e.g. key `TF`), create an issue, drag it across the board, start a sprint.
+7. **Test notifications**: Settings > enable notifications, press the test notification button. Then create a task with a reminder 2 minutes ahead and keep the tab open or the service awake; the in-process worker should fire it. On iOS install to Home Screen first.
 
 ## Verification checklist
-- [ ] `https://<api>/health` returns `{"status":"ok","db":true}`
-- [ ] `https://<api>/docs` loads
-- [ ] Static site loads; deep link (e.g. `/tasks`) reloads without 404
-- [ ] Register/login/logout works; no CORS errors in the browser console
+- [ ] `https://<service>/health` returns `{"status":"ok","db":true}`
+- [ ] `https://<service>/docs` loads
+- [ ] The UI loads at `/`; deep links (e.g. `/tasks`, `/jira`) reload without 404
+- [ ] Register/login/logout works
 - [ ] Create, edit, complete, delete a task; data persists after reload
-- [ ] Cron job runs every minute with no errors in logs
-- [ ] Test notification appears in-app; push appears on a subscribed device
-- [ ] Reminder fires at the expected time
-- [ ] Attachment upload works and survives a redeploy (only with persistent disk/object storage)
+- [ ] Logs show `in-process worker started (every 60s)` after boot
+- [ ] Jira: create project, issue, move on board, start and complete a sprint
+- [ ] Test notification appears in-app; push appears on a subscribed device (if VAPID configured)
+- [ ] Reminder fires at the expected time (service awake)
 - [ ] Live URL recorded here: `________` (do not claim deployment before this is filled)
 
 ## Troubleshooting
-- **CORS errors**: `CORS_ORIGINS` must exactly match the site origin; redeploy the API.
-- **Frontend calls localhost / wrong API**: `VITE_API_URL` was unset at build time; set it and redeploy.
-- **Migrations fail**: check `DATABASE_URL` in logs; `postgres://` is normalized by the app, run `alembic upgrade head` in Shell.
+- **Blank page / 404 on `/`**: the image was built without the frontend; check the Docker build logs for the `npm run build` stage.
+- **Migrations fail**: check `DATABASE_URL` in logs; `postgres://` is normalized by the app. Run `alembic upgrade head` in the service Shell.
 - **First request very slow**: free service waking up.
-- **No push**: missing VAPID keys, permission denied, expired subscription, cron not running, or iOS not installed as PWA.
-- **Reminders late/missing**: cron job not running or not on a paid plan; check `SECRET_KEY`/`DATABASE_URL` set on cron.
+- **No push**: missing VAPID keys, permission denied, expired subscription, or iOS not installed as a PWA.
+- **Reminders late/missing**: the service was asleep (free plan). Keep it awake with an uptime pinger or upgrade.
+- **Worker not running**: ensure `RUN_WORKER_IN_PROCESS=1` and look for worker errors in the logs.
 - **Uploads vanish**: ephemeral disk; add persistent disk or object storage.
-- **Database gone**: free Postgres expired; upgrade and restore.
+- **Database errors on first request**: Neon compute was paused; retry after a few seconds.
+- **Cost**: everything above is free-tier; `ANTHROPIC_API_KEY` is optional and is the only thing that would incur usage charges (AI features fall back to rules without it).

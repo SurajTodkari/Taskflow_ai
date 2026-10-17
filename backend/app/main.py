@@ -1,6 +1,7 @@
 import importlib
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -27,7 +28,27 @@ if os.environ.get("RENDER") and settings.DATABASE_URL.startswith("sqlite"):
     log.error("DATABASE_URL is not set: using ephemeral SQLite. All users/tasks are LOST on every "
               "redeploy/restart. Create a Render Postgres and set DATABASE_URL on this service.")
 
-app = FastAPI(title="TaskFlow AI API", version="1.0.0")
+def _worker_enabled() -> bool:
+    # default: on only when running on Render (free plan has no cron service); never in tests
+    default = "1" if os.environ.get("RENDER") else "0"
+    return os.environ.get("RUN_WORKER_IN_PROCESS", default).strip().lower() in ("1", "true", "yes", "on")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    stop = None
+    if _worker_enabled():
+        from .worker import start_background
+        stop = start_background(interval=60)
+        log.info("in-process worker started (every 60s)")
+    try:
+        yield
+    finally:
+        if stop is not None:
+            stop.set()
+
+
+app = FastAPI(title="TaskFlow AI API", version="1.0.0", lifespan=lifespan)
 app.state.limiter = limiter
 
 
@@ -85,7 +106,7 @@ def health():
 for _name in ("auth", "tasks", "projects", "settings"):
     app.include_router(importlib.import_module(f"app.routers.{_name}").router)
 
-for _name in ("dashboard", "notifications", "reports", "analytics", "ai", "calendar", "ws"):
+for _name in ("dashboard", "notifications", "reports", "analytics", "ai", "calendar", "ws", "jira"):
     try:
         _mod = importlib.import_module(f"app.routers.{_name}")
         app.include_router(_mod.router)
