@@ -1,11 +1,12 @@
 import importlib
 import logging
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -58,11 +59,6 @@ async def _unhandled(request: Request, exc: Exception):
     return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
 
-@app.get("/", include_in_schema=False)
-def root():
-    return {"name": "TaskFlow AI API", "docs": "/docs", "health": "/health"}
-
-
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return Response(status_code=204)
@@ -94,3 +90,22 @@ for _name in ("dashboard", "notifications", "reports", "analytics", "ai", "calen
             log.warning("router %s not present, skipped", _name)
     except Exception:
         log.exception("router %s failed to load, skipped", _name)
+
+
+# Serve the built frontend (if present) from the same service; API stays under /api.
+_static = Path(os.environ.get("STATIC_DIR", Path(__file__).resolve().parent.parent / "static"))
+if (_static / "index.html").is_file():
+    _index = _static / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        if full_path.startswith("api/"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        f = (_static / full_path).resolve()
+        if full_path and f.is_file() and _static.resolve() in f.parents:
+            return FileResponse(f)
+        return FileResponse(_index)
+else:
+    @app.get("/", include_in_schema=False)
+    def root():
+        return {"name": "TaskFlow AI API", "docs": "/docs", "health": "/health"}

@@ -72,7 +72,6 @@ export function buildQuery(q?: Record<string, unknown>): string {
 }
 
 async function doFetch(path: string, o: ReqOpts): Promise<Response> {
-  if (!API_URL && import.meta.env.PROD) throw new ApiError(0, 'App is not configured: VITE_API_URL was not set when this site was built. Set it to the API URL in Render and redeploy.');
   const headers: Record<string, string> = {};
   if (o.auth !== false && tokenStore.access) headers.Authorization = `Bearer ${tokenStore.access}`;
   let body: BodyInit | undefined;
