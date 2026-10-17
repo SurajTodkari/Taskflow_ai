@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Pencil, Trash2, Link2, Copy, ArrowRightLeft, Archive, Flag } from 'lucide-react';
@@ -10,6 +10,7 @@ import { Skeleton } from '../../components/Skeleton';
 import { useToast } from '../../components/Toast';
 import { Tabs } from '../../components/ui/Tabs';
 import { useAuth } from '../../lib/auth';
+import { ProjectCtx } from './ctx';
 import { fmtDate } from '../../lib/dates';
 import { jiraApi } from '../../lib/jiraApi';
 import { ISSUE_TYPES, PRIORITIES, type IssueDetail, type IssuePatch, type IssueType, type JiraComment, type JiraProjectDetail, type Priority } from '../../lib/jiraTypes';
@@ -35,6 +36,7 @@ export default function IssueDetailModal({ issueKey, project, onClose }: { issue
 }
 
 function Body({ issue, project, onClose }: { issue: IssueDetail; project: JiraProjectDetail; onClose: () => void }) {
+  const teamCtx = useContext(ProjectCtx);
   const toast = useToast();
   const errToast = useErrToast();
   const refresh = useRefreshJira();
@@ -156,8 +158,8 @@ function Body({ issue, project, onClose }: { issue: IssueDetail; project: JiraPr
             {project.columns.map((c) => <option key={c.id} value={c.id} disabled={c.id !== issue.column_id && !!issue.allowed_column_ids && project.enforce_workflow === true && !issue.allowed_column_ids.includes(c.id)}>{c.name}</option>)}</select></div>
         <WatchBox issue={issue} />
         <div><label className="label" htmlFor="f-asg">Assignee</label>
-          <select id="f-asg" className="input" disabled={dis} value={issue.assignee?.id ?? ''} onChange={(e) => save({ assignee_id: e.target.value ? Number(e.target.value) : null })}>
-            <option value="">Unassigned</option>{assignable.map((m) => <option key={m.user_id} value={m.user_id}>{m.name}</option>)}</select>
+          <select id="f-asg" className="input" disabled={dis} value={issue.assignee?.id ?? ''} onChange={(e) => { if (e.target.value === '__team') { teamCtx?.openTeam(); return; } save({ assignee_id: e.target.value ? Number(e.target.value) : null }); }}>
+            <option value="">Unassigned</option>{assignable.map((m) => <option key={m.user_id} value={m.user_id}>{m.name}</option>)}<option value="__team">+ Add / invite people…</option></select>
           {editable && !issue.assignee && <MeButton project={project} onAssign={(id) => save({ assignee_id: id })} />}</div>
         <div><label className="label" htmlFor="f-pri">Priority</label>
           <select id="f-pri" className="input" disabled={dis} value={issue.priority} onChange={(e) => save({ priority: e.target.value as Priority })}>

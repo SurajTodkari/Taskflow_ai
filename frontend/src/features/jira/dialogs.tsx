@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import Modal from '../../components/Modal';
 import { useToast } from '../../components/Toast';
@@ -6,10 +6,12 @@ import { jiraApi } from '../../lib/jiraApi';
 import { ISSUE_TYPES, PRIORITIES, type IssueInput, type IssueType, type JiraProjectDetail, type JiraSprint, type Priority } from '../../lib/jiraTypes';
 import { useErrToast, useRefreshJira } from './hooks';
 import { PRIORITY_META, TYPE_META } from './ui';
+import { ProjectCtx } from './ctx';
 
 export interface CreateDefaults { column_id?: number; sprint_id?: number | null; type?: IssueType; parent_id?: number }
 
 export function CreateIssueModal({ project, defaults, onClose, onCreated }: { project: JiraProjectDetail; defaults?: CreateDefaults; onClose: () => void; onCreated?: (key: string) => void }) {
+  const teamCtx = useContext(ProjectCtx);
   const toast = useToast();
   const errToast = useErrToast();
   const refresh = useRefreshJira();
@@ -62,8 +64,8 @@ export function CreateIssueModal({ project, defaults, onClose, onCreated }: { pr
           <textarea id="ci-desc" className="input" rows={4} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
         <div className="grid gap-4 sm:grid-cols-2">
           <div><label className="label" htmlFor="ci-asg">Assignee</label>
-            <select id="ci-asg" className="input" value={assignee} onChange={(e) => setAssignee(e.target.value)}>
-              <option value="">Unassigned</option>{project.members.filter((x) => x.role !== 'viewer').map((x) => <option key={x.user_id} value={x.user_id}>{x.name}</option>)}</select></div>
+            <select id="ci-asg" className="input" value={assignee} onChange={(e) => { if (e.target.value === '__team') { teamCtx?.openTeam(); return; } setAssignee(e.target.value); }}>
+              <option value="">Unassigned</option>{project.members.filter((x) => x.role !== 'viewer').map((x) => <option key={x.user_id} value={x.user_id}>{x.name}</option>)}<option value="__team">+ Add / invite people…</option></select></div>
           <div><label className="label" htmlFor="ci-col">Status</label>
             <select id="ci-col" className="input" value={column} onChange={(e) => setColumn(e.target.value)}>
               <option value="">{project.columns[0]?.name ?? 'Default'}</option>{project.columns.slice(1).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>

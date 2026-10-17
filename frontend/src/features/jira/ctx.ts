@@ -6,6 +6,7 @@ export interface ProjectCtxValue {
   project: JiraProjectDetail;
   openIssue: (key: string) => void;
   newIssue: (defaults?: CreateDefaults) => void;
+  openTeam: () => void;
 }
 export const ProjectCtx = createContext<ProjectCtxValue | null>(null);
 export function useProjectCtx(): ProjectCtxValue {

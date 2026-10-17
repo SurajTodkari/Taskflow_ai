@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useMemo, useState, type ComponentType } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Plus, ChevronLeft } from 'lucide-react';
+import { Plus, ChevronLeft, Users } from 'lucide-react';
 import ErrorBanner from '../../components/ErrorBanner';
 import EmptyState from '../../components/EmptyState';
 import { Skeleton } from '../../components/Skeleton';
@@ -9,6 +9,7 @@ import { ProjectCtx } from '../../features/jira/ctx';
 import { CreateIssueModal, type CreateDefaults } from '../../features/jira/dialogs';
 import { useProject } from '../../features/jira/hooks';
 import IssueDetailModal from '../../features/jira/IssueDetailModal';
+import TeamModal from '../../features/jira/TeamModal';
 import { canEdit } from '../../features/jira/ui';
 import Board from './Board';
 import Backlog from './Backlog';
@@ -30,6 +31,7 @@ export default function ProjectLayout() {
   const nav = useNavigate();
   const q = useProject(key);
   const [creating, setCreating] = useState<CreateDefaults | null>(null);
+  const [team, setTeam] = useState(false);
   useEffect(() => {
     const h = () => setCreating({});
     window.addEventListener('jira:create-issue', h);
@@ -43,6 +45,7 @@ export default function ProjectLayout() {
     project: q.data,
     openIssue: (ik: string) => nav(`/jira/${q.data.key}/issue/${ik}`, { state: { bg: tab } }),
     newIssue: (d?: CreateDefaults) => setCreating(d ?? {}),
+    openTeam: () => setTeam(true),
   }) : null, [q.data, nav, tab]);
 
   if (q.isLoading) return <div className="space-y-4"><Skeleton className="h-8 w-64" /><Skeleton className="h-10 w-full max-w-md" /><Skeleton className="h-72 w-full rounded-2xl" /></div>;
@@ -65,7 +68,10 @@ export default function ProjectLayout() {
             <Link to="/jira" className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-fg"><ChevronLeft size={14} />Projects</Link>
             <h1 className="flex items-center gap-2 text-page font-semibold"><span className="rounded-lg bg-accent-soft px-2 py-0.5 text-sm font-bold text-accent">{p.key}</span><span className="truncate">{p.name}</span></h1>
           </div>
-          {canEdit(p.my_role) && !p.archived && <button className="btn-primary" onClick={() => setCreating({})}><Plus size={16} />Create issue</button>}
+          <div className="flex items-center gap-2">
+            <button className="btn-ghost" onClick={() => setTeam(true)}><Users size={16} />Team ({p.members.length})</button>
+            {canEdit(p.my_role) && !p.archived && <button className="btn-primary" onClick={() => setCreating({})}><Plus size={16} />Create issue</button>}
+          </div>
         </div>
         <nav aria-label="Project sections" className="-mx-1 flex gap-1 overflow-x-auto border-b border-line px-1">
           {TABS.filter((t) => !(t.id === 'backlog' && p.board_type === 'kanban')).map((t) => (
@@ -75,6 +81,7 @@ export default function ProjectLayout() {
         </nav>
         {p.archived && <p role="status" className="rounded-xl border border-line bg-surface-2 px-4 py-2 text-sm text-fg-muted">This project is archived and read-only.</p>}
         <Suspense fallback={<Skeleton className="h-64 w-full rounded-2xl" />}>{issueKey && Page ? <Page /> : <Outlet />}</Suspense>
+        <TeamModal project={p} open={team} onClose={() => setTeam(false)} />
         {issueKey && <IssueDetailModal issueKey={issueKey} project={p} onClose={closeIssue} />}
         {creating && <CreateIssueModal project={p} defaults={creating} onClose={() => setCreating(null)} onCreated={() => undefined} />}
       </div>
