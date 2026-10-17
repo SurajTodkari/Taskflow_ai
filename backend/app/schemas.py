@@ -244,6 +244,7 @@ class SettingsUpdate(BaseModel):
     notify_reminders: Optional[bool] = None
     notify_overdue: Optional[bool] = None
     recurring_defaults: Optional[dict] = None
+    jira_email_notifications: Optional[bool] = None
 
     @field_validator("timezone")
     @classmethod
@@ -288,6 +289,7 @@ class JiraProjectCreate(BaseModel):
     key: str
     name: str = Field(min_length=1, max_length=120)
     description: Optional[str] = Field(default=None, max_length=5000)
+    board_type: Literal["scrum", "kanban"] = "scrum"
 
     @field_validator("key")
     @classmethod
@@ -310,6 +312,10 @@ class JiraProjectUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     description: Optional[str] = Field(default=None, max_length=5000)
     lead_id: Optional[int] = None
+    board_type: Optional[Literal["scrum", "kanban"]] = None
+    enforce_workflow: Optional[bool] = None
+    default_assignee_id: Optional[int] = None
+    archived: Optional[bool] = None
 
 
 class JiraMemberAdd(BaseModel):
@@ -330,6 +336,7 @@ class JiraColumnUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=60)
     category: Optional[JiraCategory] = None
     position: Optional[int] = Field(default=None, ge=0)
+    wip_limit: Optional[int] = Field(default=None, ge=1, le=1000)
 
 
 class JiraIssueCreate(BaseModel):
@@ -344,6 +351,15 @@ class JiraIssueCreate(BaseModel):
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
     labels: list[str] = Field(default_factory=list)
     due_date: Optional[date] = None
+    start_date: Optional[date] = None
+    original_estimate_min: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    remaining_estimate_min: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    flagged: bool = False
+    archived: bool = False
+    fix_version_id: Optional[int] = None
+    component_ids: list[int] = Field(default_factory=list)
+    custom_fields: dict = Field(default_factory=dict)
+    environment: Optional[str] = Field(default=None, max_length=20000)
 
     _labels = field_validator("labels")(_clean_labels)
 
@@ -368,6 +384,15 @@ class JiraIssueUpdate(BaseModel):
     story_points: Optional[int] = Field(default=None, ge=0, le=1000)
     labels: Optional[list[str]] = None
     due_date: Optional[date] = None
+    start_date: Optional[date] = None
+    original_estimate_min: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    remaining_estimate_min: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    flagged: Optional[bool] = None
+    archived: Optional[bool] = None
+    fix_version_id: Optional[int] = None
+    component_ids: Optional[list[int]] = None
+    custom_fields: Optional[dict] = None
+    environment: Optional[str] = Field(default=None, max_length=20000)
 
     _labels = field_validator("labels")(_clean_labels)
 
@@ -433,3 +458,119 @@ class JiraSprintStart(BaseModel):
 
 class JiraSprintComplete(BaseModel):
     move_open_to: str | int = "backlog"
+
+
+# ---------- jira v2
+JiraLinkType = Literal["blocks", "relates", "duplicates", "clones"]
+JiraFieldType = Literal["text", "number", "select", "date", "checkbox"]
+
+
+class JiraLinkIn(BaseModel):
+    link_type: JiraLinkType
+    target_key: str
+
+
+class JiraComponentIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    lead_id: Optional[int] = None
+
+
+class JiraComponentUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    lead_id: Optional[int] = None
+
+
+class JiraVersionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    start_date: Optional[date] = None
+    release_date: Optional[date] = None
+
+
+class JiraVersionUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    start_date: Optional[date] = None
+    release_date: Optional[date] = None
+
+
+class JiraVersionRelease(BaseModel):
+    move_open_to_version_id: Optional[int] = None
+
+
+class JiraWorklogIn(BaseModel):
+    minutes: int = Field(ge=1, le=100_000)
+    started_at: Optional[datetime] = None
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
+class JiraWorklogUpdate(BaseModel):
+    minutes: Optional[int] = Field(default=None, ge=1, le=100_000)
+    started_at: Optional[datetime] = None
+    comment: Optional[str] = Field(default=None, max_length=5000)
+
+
+class JiraFilterIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    jql: str = Field(default="", max_length=4000)
+    shared: bool = False
+    project_key: Optional[str] = None
+
+
+class JiraFilterUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    jql: Optional[str] = Field(default=None, max_length=4000)
+    shared: Optional[bool] = None
+
+
+class JiraTransitionPair(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    from_: int = Field(alias="from")
+    to: int
+
+
+class JiraWorkflowIn(BaseModel):
+    transitions: list[JiraTransitionPair]
+
+
+class JiraCustomFieldIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    field_type: JiraFieldType
+    options: list[str] = Field(default_factory=list)
+    required: bool = False
+
+
+class JiraCustomFieldUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    options: Optional[list[str]] = None
+    required: Optional[bool] = None
+    position: Optional[int] = Field(default=None, ge=0)
+
+
+class JiraBulkPatch(BaseModel):
+    assignee_id: Optional[int] = None
+    priority: Optional[JiraPriority] = None
+    column_id: Optional[int] = None
+    sprint_id: Optional[int] = None
+    labels_add: Optional[list[str]] = None
+    labels_remove: Optional[list[str]] = None
+    fix_version_id: Optional[int] = None
+    component_ids: Optional[list[int]] = None
+
+
+class JiraBulkIn(BaseModel):
+    issue_keys: list[str] = Field(min_length=1, max_length=100)
+    action: Literal["update", "delete", "archive", "unarchive"]
+    patch: Optional[JiraBulkPatch] = None
+
+
+class JiraCloneIn(BaseModel):
+    include_subtasks: bool = False
+    title_prefix: Optional[str] = Field(default=None, max_length=50)
+
+
+class JiraMoveProjectIn(BaseModel):
+    project_key: str
+    column_id: Optional[int] = None

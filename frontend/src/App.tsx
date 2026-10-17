@@ -26,6 +26,7 @@ import Backlog from './pages/jira/Backlog';
 import Issues from './pages/jira/Issues';
 import Summary from './pages/jira/Summary';
 import ProjectSettings from './pages/jira/ProjectSettings';
+import { Activity, Filters, Releases, Reports as ProjectReports, Roadmap } from './pages/jira/lazy';
 
 function Protected() {
   const { user, loading } = useAuth();
@@ -65,6 +66,11 @@ export default function App() {
           <Route path="backlog" element={<Backlog />} />
           <Route path="issues" element={<Issues />} />
           <Route path="summary" element={<Summary />} />
+          <Route path="roadmap" element={<Roadmap />} />
+          <Route path="releases" element={<Releases />} />
+          <Route path="reports" element={<ProjectReports />} />
+          <Route path="activity" element={<Activity />} />
+          <Route path="filters" element={<Filters />} />
           <Route path="settings" element={<ProjectSettings />} />
           <Route path="issue/:issueKey" element={null} />
         </Route>

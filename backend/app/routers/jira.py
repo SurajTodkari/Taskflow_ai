@@ -2,17 +2,20 @@ from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import get_current_user
-from ..models import (JiraColumn, JiraComment, JiraHistory, JiraIssue, JiraMember, JiraProject, JiraSprint,
-                      User)
+from ..models import (JiraColumn, JiraComment, JiraHistory, JiraInvite, JiraIssue, JiraMember, JiraProject,
+                      JiraSprint, User)
 from ..schemas import (JiraColumnCreate, JiraColumnUpdate, JiraCommentIn, JiraIssueCreate, JiraIssueUpdate,
                        JiraMemberAdd, JiraMemberUpdate, JiraMoveIn, JiraProjectCreate, JiraProjectUpdate,
                        JiraRankIn, JiraSprintComplete, JiraSprintCreate, JiraSprintStart, JiraSprintUpdate)
 from ..services import jira as svc
+from ..services import jql as jqlsvc
+from ..services import mailer
 from ..services.tasks import aware
 
 router = APIRouter(prefix="/api/jira", tags=["jira"])
@@ -28,9 +31,13 @@ def _commit(db: Session, conflict: str = "Conflicting update"):
 
 # ------------------------------------------------------------------ projects
 @router.get("/projects")
-def list_projects(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = (db.query(JiraProject, JiraMember.role).join(JiraMember, JiraMember.project_id == JiraProject.id)
-            .filter(JiraMember.user_id == user.id).order_by(JiraProject.name, JiraProject.id).all())
+def list_projects(include_archived: bool = False, user: User = Depends(get_current_user),
+                  db: Session = Depends(get_db)):
+    q = (db.query(JiraProject, JiraMember.role).join(JiraMember, JiraMember.project_id == JiraProject.id)
+         .filter(JiraMember.user_id == user.id))
+    if not include_archived:
+        q = q.filter(JiraProject.archived.is_(False))
+    rows = q.order_by(JiraProject.name, JiraProject.id).all()
     return [svc.project_out(db, p, role) for p, role in rows]
 
 
@@ -39,7 +46,7 @@ def create_project(body: JiraProjectCreate, user: User = Depends(get_current_use
     if db.query(JiraProject.id).filter(JiraProject.key == body.key).first():
         raise HTTPException(409, "A project with this key already exists")
     try:
-        p = svc.create_project(db, user, body.key, body.name, body.description)
+        p = svc.create_project(db, user, body.key, body.name, body.description, body.board_type)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -56,12 +63,19 @@ def get_project(key: str, user: User = Depends(get_current_user), db: Session = 
 @router.patch("/projects/{key}")
 def patch_project(key: str, body: JiraProjectUpdate, user: User = Depends(get_current_user),
                   db: Session = Depends(get_db)):
-    p, role = svc.project_for(db, user, key, "admin")
+    p, role = svc.project_for(db, user, key, "admin", allow_archived=True)
     data = body.model_dump(exclude_unset=True)
-    if data.get("name", "x") is None:
-        raise HTTPException(422, "name cannot be null")
+    if p.archived and data.get("archived") is not False:
+        raise HTTPException(409, "Project is archived; unarchive it first")
+    for k in ("name", "board_type", "enforce_workflow", "archived"):
+        if k in data and data[k] is None:
+            raise HTTPException(422, f"{k} cannot be null")
     if data.get("lead_id") is not None and not svc.get_member(db, p.id, data["lead_id"]):
         raise HTTPException(422, "Lead must be a project member")
+    if data.get("default_assignee_id") is not None and not svc.get_member(db, p.id, data["default_assignee_id"]):
+        raise HTTPException(422, "Default assignee must be a project member")
+    if data.get("board_type") == "kanban" and svc.active_sprint(db, p.id):
+        raise HTTPException(409, "Complete the active sprint before switching to kanban")
     for k, v in data.items():
         setattr(p, k, v)
     db.commit()
@@ -70,7 +84,7 @@ def patch_project(key: str, body: JiraProjectUpdate, user: User = Depends(get_cu
 
 @router.delete("/projects/{key}", status_code=204)
 def delete_project(key: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    p, _ = svc.project_for(db, user, key, "admin")
+    p, _ = svc.project_for(db, user, key, "admin", allow_archived=True)
     db.query(JiraIssue).filter(JiraIssue.project_id == p.id).delete(synchronize_session=False)
     db.delete(p)
     db.commit()
@@ -85,15 +99,26 @@ def _admin_count(db: Session, project_id: int) -> int:
 @router.post("/projects/{key}/members", status_code=201)
 def add_member(key: str, body: JiraMemberAdd, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     p, _ = svc.project_for(db, user, key, "admin")
-    target = db.query(User).filter(User.email == body.email.lower()).first()
+    email = body.email.lower()
+    target = db.query(User).filter(User.email == email).first()
     if not target:
-        raise HTTPException(404, "No user with that email")
+        inv = db.query(JiraInvite).filter_by(project_id=p.id, email=email).first()
+        if inv:
+            inv.role = body.role
+        else:
+            db.add(JiraInvite(project_id=p.id, email=email, role=body.role, invited_by=user.id))
+        _commit(db, "Invite already exists")
+        mailer.send_raw(email, f"{user.name} invited you to {p.name} on TaskFlow",
+                        f"{user.name} invited you to join the project {p.name} ({p.key}) as {body.role}. "
+                        "Sign up with this email address and you will be added automatically.")
+        return JSONResponse({"invited": True, "email": email, "role": body.role}, status_code=201)
     if svc.get_member(db, p.id, target.id):
         raise HTTPException(409, "User is already a member of this project")
     m = JiraMember(project_id=p.id, user_id=target.id, role=body.role)
     db.add(m)
     db.flush()
     svc.notify_added(db, p, target.id, user, body.role)
+    db.query(JiraInvite).filter_by(project_id=p.id, email=email).delete()
     _commit(db, "User is already a member of this project")
     return svc.member_out(m, target)
 
@@ -150,6 +175,7 @@ def _column(db: Session, user: User, column_id: int) -> tuple[JiraColumn, JiraPr
     if not c or not svc.get_member(db, p.id, user.id):
         raise HTTPException(404, "Column not found")
     svc.require_role(svc.get_member(db, p.id, user.id).role, "admin")
+    svc.check_writable(p)
     return c, p
 
 
@@ -166,6 +192,8 @@ def patch_column(column_id: int, body: JiraColumnUpdate, user: User = Depends(ge
         c.category = data["category"]
         for i in db.query(JiraIssue).filter(JiraIssue.column_id == c.id).all():
             svc.set_resolved(i, c)
+    if "wip_limit" in data:
+        c.wip_limit = data["wip_limit"]
     if data.get("position") is not None:
         cols = [x for x in svc.project_columns(db, p.id) if x.id != c.id]
         cols.insert(min(data["position"], len(cols)), c)
@@ -208,13 +236,15 @@ def list_issues(response: Response, key: str, q: str | None = None, type: str | 
                 priority: str | None = None, label: str | None = None, sprint_id: str | None = None,
                 parent_id: int | None = None, sort: Literal["rank", "created", "updated", "priority", "due"] = "rank",
                 order: Literal["asc", "desc"] = "asc", limit: int = Query(100, ge=1, le=200),
-                offset: int = Query(0, ge=0), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+                offset: int = Query(0, ge=0), jql: str | None = None, include_archived: bool = False,
+                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     p, _ = svc.project_for(db, user, key)
     query = svc.issue_filters(db, p, user, q, type, status_category, column_id, assignee, priority, label,
-                              sprint_id, parent_id)
+                              sprint_id, parent_id, include_archived)
+    query, jql_order = jqlsvc.apply_jql(db, user, query, jql)
     response.headers["X-Total-Count"] = str(query.count())
-    rows = query.order_by(*svc.sort_clause(sort, order)).offset(offset).limit(limit).all()
-    return svc.serialize_issues(db, rows)
+    rows = query.order_by(*(jql_order or svc.sort_clause(sort, order))).offset(offset).limit(limit).all()
+    return svc.serialize_issues(db, rows, viewer=user)
 
 
 @router.post("/projects/{key}/issues", status_code=201)
@@ -227,7 +257,7 @@ def create_issue(key: str, body: JiraIssueCreate, user: User = Depends(get_curre
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "Could not allocate an issue number, retry")
-    return svc.serialize_issue(db, issue, detail=True)
+    return svc.serialize_issue(db, issue, detail=True, viewer=user)
 
 
 # my-issues is declared before the /issues/{key} routes only for readability; paths do not collide
@@ -236,19 +266,20 @@ def my_issues(status_category: Literal["open", "done"] | None = None, user: User
               db: Session = Depends(get_db)):
     q = (db.query(JiraIssue).join(JiraMember, (JiraMember.project_id == JiraIssue.project_id)
                                   & (JiraMember.user_id == user.id))
-         .join(JiraColumn, JiraColumn.id == JiraIssue.column_id).filter(JiraIssue.assignee_id == user.id))
+         .join(JiraColumn, JiraColumn.id == JiraIssue.column_id)
+         .filter(JiraIssue.assignee_id == user.id, JiraIssue.archived.is_(False)))
     if status_category == "done":
         q = q.filter(JiraColumn.category == "done")
     elif status_category == "open":
         q = q.filter(JiraColumn.category != "done")
     rows = q.order_by(JiraIssue.updated_at.desc(), JiraIssue.id.desc()).limit(200).all()
-    return svc.serialize_issues(db, rows)
+    return svc.serialize_issues(db, rows, viewer=user)
 
 
 @router.get("/issues/{key}")
 def get_issue(key: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     i, _, _ = svc.issue_for(db, user, key)
-    return svc.serialize_issue(db, i, detail=True)
+    return svc.serialize_issue(db, i, detail=True, viewer=user)
 
 
 @router.patch("/issues/{key}")
@@ -257,7 +288,7 @@ def patch_issue(key: str, body: JiraIssueUpdate, user: User = Depends(get_curren
     i, p, _ = svc.issue_for(db, user, key, "member")
     svc.update_issue(db, p, i, user, body.model_dump(exclude_unset=True))
     db.commit()
-    return svc.serialize_issue(db, i, detail=True)
+    return svc.serialize_issue(db, i, detail=True, viewer=user)
 
 
 @router.delete("/issues/{key}", status_code=204)
@@ -273,7 +304,7 @@ def move_issue(key: str, body: JiraMoveIn, user: User = Depends(get_current_user
     i, p, _ = svc.issue_for(db, user, key, "member")
     svc.move_issue(db, p, i, user, body.column_id, body.before_issue_id, body.after_issue_id)
     db.commit()
-    return svc.serialize_issue(db, i, detail=True)
+    return svc.serialize_issue(db, i, detail=True, viewer=user)
 
 
 @router.post("/issues/{key}/rank")
@@ -281,7 +312,7 @@ def rank_issue(key: str, body: JiraRankIn, user: User = Depends(get_current_user
     i, p, _ = svc.issue_for(db, user, key, "member")
     svc.rank_issue(db, p, i, user, body.sprint_id, body.before_issue_id, body.after_issue_id)
     db.commit()
-    return svc.serialize_issue(db, i, detail=True)
+    return svc.serialize_issue(db, i, detail=True, viewer=user)
 
 
 @router.get("/issues/{key}/history")
@@ -295,7 +326,7 @@ def issue_history(key: str, user: User = Depends(get_current_user), db: Session 
 
 # ------------------------------------------------------------------ comments
 def _comment_users(db: Session, rows) -> dict:
-    ids = {c.user_id for c in rows}
+    ids = {c.user_id for c in rows} | {n for c in rows for n in svc.mention_ids(c.body)}
     return {u.id: u for u in db.query(User).filter(User.id.in_(ids)).all()} if ids else {}
 
 
@@ -316,7 +347,7 @@ def add_comment(key: str, body: JiraCommentIn, user: User = Depends(get_current_
     db.flush()
     svc.notify_comment(db, p, i, c, user)
     db.commit()
-    return svc.comment_out(c, svc.issue_key(p, i), {user.id: user})
+    return svc.comment_out(c, svc.issue_key(p, i), _comment_users(db, [c]))
 
 
 def _comment(db: Session, user: User, comment_id: int):
@@ -326,6 +357,7 @@ def _comment(db: Session, user: User, comment_id: int):
     m = svc.get_member(db, p.id, user.id) if p else None
     if not c or not m:
         raise HTTPException(404, "Comment not found")
+    svc.check_writable(p)
     if not (m.role == "admin" or (c.user_id == user.id and m.role != "viewer")):
         raise HTTPException(403, "Only the author or a project admin can change this comment")
     return c, i, p
@@ -336,6 +368,7 @@ def patch_comment(comment_id: int, body: JiraCommentIn, user: User = Depends(get
                   db: Session = Depends(get_db)):
     c, i, p = _comment(db, user, comment_id)
     c.body = body.body
+    svc.notify_mentions(db, p, i, c, user)
     db.commit()
     return svc.comment_out(c, svc.issue_key(p, i), _comment_users(db, [c]))
 
@@ -356,12 +389,22 @@ def _sprint(db: Session, user: User, sprint_id: int, min_role: str = "viewer"):
     if not s or not m:
         raise HTTPException(404, "Sprint not found")
     svc.require_role(m.role, min_role)
+    if min_role != "viewer":
+        svc.check_writable(p)
+    if p.board_type == "kanban":
+        raise HTTPException(409, "Kanban projects do not use sprints")
     return s, p
+
+
+def _no_kanban(p: JiraProject):
+    if p.board_type == "kanban":
+        raise HTTPException(409, "Kanban projects do not use sprints")
 
 
 @router.get("/projects/{key}/sprints")
 def list_sprints(key: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     p, _ = svc.project_for(db, user, key)
+    _no_kanban(p)
     return [svc.sprint_out(db, s) for s in svc.project_sprints(db, p.id)]
 
 
@@ -369,6 +412,7 @@ def list_sprints(key: str, user: User = Depends(get_current_user), db: Session =
 def create_sprint(key: str, body: JiraSprintCreate, user: User = Depends(get_current_user),
                   db: Session = Depends(get_db)):
     p, _ = svc.project_for(db, user, key, "member")
+    _no_kanban(p)
     s = JiraSprint(project_id=p.id, name=body.name.strip(), goal=body.goal, start_date=body.start_date,
                    end_date=body.end_date, state="planned")
     db.add(s)
@@ -459,6 +503,8 @@ def board(key: str, sprint_id: str = "active", assignee: str | None = None, labe
           q: str | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     p, _ = svc.project_for(db, user, key)
     sprint = None
+    if p.board_type == "kanban":
+        sprint_id = "all"
     if sprint_id == "active":
         sprint = svc.active_sprint(db, p.id)
     elif sprint_id.isdigit():
@@ -470,12 +516,13 @@ def board(key: str, sprint_id: str = "active", assignee: str | None = None, labe
     sid = "all" if sprint_id == "all" else str(sprint.id if sprint else 0)
     query = svc.issue_filters(db, p, user, q=q, assignee=assignee, label=label, sprint_id=sid)
     rows = query.order_by(JiraIssue.rank, JiraIssue.id).all()
-    cards = svc.serialize_issues(db, rows)
+    cards = svc.serialize_issues(db, rows, viewer=user)
     by_col: dict[int, list] = {}
     for c in cards:
         by_col.setdefault(c["column_id"], []).append(c)
-    return {"sprint": svc.sprint_out(db, sprint) if sprint else None,
-            "columns": [{**svc.column_out(c), "issues": by_col.get(c.id, [])}
+    return {"sprint": svc.sprint_out(db, sprint) if sprint else None, "board_type": p.board_type,
+            "columns": [{**svc.column_out(c), "issues": by_col.get(c.id, []),
+                         "over_wip": bool(c.wip_limit and len(by_col.get(c.id, [])) > c.wip_limit)}
                         for c in svc.project_columns(db, p.id)]}
 
 

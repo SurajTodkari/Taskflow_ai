@@ -91,10 +91,10 @@ def test_project_patch_delete_admin_only(client, env):
 # ------------------------------------------------------------------ members
 def test_members_management(client, env):
     a = env["alice"]
-    assert client.post("/api/jira/projects/TF/members", json={"email": "ghost@example.com", "role": "member"},
-                       headers=a).json()["detail"] == "No user with that email"
-    assert client.post("/api/jira/projects/TF/members", json={"email": "ghost@example.com", "role": "member"},
-                       headers=a).status_code == 404
+    # v2: unregistered emails get a pending invite instead of a 404
+    r = client.post("/api/jira/projects/TF/members", json={"email": "ghost@example.com", "role": "member"},
+                    headers=a)
+    assert r.status_code == 201 and r.json() == {"invited": True, "email": "ghost@example.com", "role": "member"}
     assert client.post("/api/jira/projects/TF/members", json={"email": "bob@example.com", "role": "member"},
                        headers=a).status_code == 409
     assert client.post("/api/jira/projects/TF/members", json={"email": "dave@example.com", "role": "member"},

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { motion, useReducedMotion } from 'motion/react';
@@ -10,6 +10,7 @@ import { Skeleton } from '../../components/Skeleton';
 import { useToast } from '../../components/Toast';
 import { jiraApi } from '../../lib/jiraApi';
 import { useErrToast, useRefreshJira } from '../../features/jira/hooks';
+const JiraDashboard = lazy(() => import('./JiraDashboard'));
 
 export function suggestKey(name: string): string {
   const words = name.toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
@@ -28,9 +29,10 @@ function CreateProject({ onClose }: { onClose: () => void }) {
   const [key, setKey] = useState('');
   const [touched, setTouched] = useState(false);
   const [desc, setDesc] = useState('');
+  const [boardType, setBoardType] = useState<'scrum' | 'kanban'>('scrum');
   const [err, setErr] = useState('');
   const m = useMutation({
-    mutationFn: () => jiraApi.createProject({ key, name: name.trim(), description: desc.trim() || undefined }),
+    mutationFn: () => jiraApi.createProject({ key, name: name.trim(), description: desc.trim() || undefined, board_type: boardType }),
     onSuccess: (p) => { refresh(); toast(`Project ${p.key} created`); onClose(); nav(`/jira/${p.key}/board`); },
     onError: (e) => { const msg = e instanceof Error ? e.message : 'Could not create project'; setErr(msg); errToast(e); },
   });
@@ -50,6 +52,8 @@ function CreateProject({ onClose }: { onClose: () => void }) {
           <p id="jp-key-h" className="mt-1 text-caption text-fg-muted">Issues will be numbered {key || 'KEY'}-1, {key || 'KEY'}-2, ... The key cannot be changed later.</p></div>
         <div><label className="label" htmlFor="jp-desc">Description</label>
           <textarea id="jp-desc" className="input" rows={3} value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
+        <div><label className="label" htmlFor="jp-bt">Board type</label>
+          <select id="jp-bt" className="input" value={boardType} onChange={(e) => setBoardType(e.target.value as 'scrum' | 'kanban')}><option value="scrum">Scrum (sprints and backlog)</option><option value="kanban">Kanban (continuous flow)</option></select></div>
         {err && <p role="alert" className="text-sm text-danger">{err}</p>}
         <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
           <button className="btn-primary" disabled={m.isPending}>{m.isPending ? 'Creating...' : 'Create project'}</button></div>
@@ -61,7 +65,8 @@ function CreateProject({ onClose }: { onClose: () => void }) {
 export default function JiraProjects() {
   const reduce = useReducedMotion();
   const [creating, setCreating] = useState(false);
-  const q = useQuery({ queryKey: ['jira', 'projects'], queryFn: jiraApi.listProjects });
+  const [archived, setArchived] = useState(false);
+  const q = useQuery({ queryKey: ['jira', 'projects', archived], queryFn: () => (archived ? jiraApi.listProjectsWithArchived() : jiraApi.listProjects()) });
   const list = q.data ?? [];
   return (
     <div className="space-y-6">
@@ -69,6 +74,8 @@ export default function JiraProjects() {
         <div><h1 className="text-page font-semibold">Projects (Jira)</h1><p className="text-sm text-fg-muted">Team projects with boards, backlogs and sprints.</p></div>
         <div className="flex gap-2"><Link to="/jira/my-issues" className="btn-ghost">My issues</Link><button className="btn-primary" onClick={() => setCreating(true)}><Plus size={16} />Create project</button></div>
       </div>
+      <Suspense fallback={null}><JiraDashboard /></Suspense>
+      <label className="flex items-center gap-2 text-sm text-fg-muted"><input type="checkbox" className="h-4 w-4 accent-[rgb(var(--accent))]" checked={archived} onChange={(e) => setArchived(e.target.checked)} />Show archived projects</label>
       {q.error && <ErrorBanner error={q.error} onRetry={() => q.refetch()} />}
       {q.isLoading ? <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-40 w-full rounded-2xl" />)}</div>
         : list.length === 0 && !q.error ? <EmptyState icon={KanbanSquare} title="No projects yet" hint="Create a project to plan work with a board, backlog and sprints." action={<button className="btn-primary" onClick={() => setCreating(true)}>Create project</button>} />
@@ -79,7 +86,7 @@ export default function JiraProjects() {
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-xs font-bold text-accent">{p.key.slice(0, 4)}</span>
                 <div className="min-w-0 flex-1">
                   <Link to={`/jira/${p.key}/board`} className="block truncate font-semibold after:absolute after:inset-0 after:content-[''] hover:text-accent">{p.name}</Link>
-                  <p className="text-caption text-fg-muted">{p.key} · {p.my_role}{p.lead ? ` · Lead ${p.lead.name}` : ''}</p>
+                  <p className="text-caption text-fg-muted">{p.key} · {p.my_role}{p.archived ? ' · archived' : ''}{p.board_type === 'kanban' ? ' · kanban' : ''}{p.lead ? ` · Lead ${p.lead.name}` : ''}</p>
                 </div>
               </div>
               <p className={`mt-3 line-clamp-2 text-sm ${p.description ? 'text-fg-muted' : 'italic text-fg-muted'}`}>{p.description || 'No description'}</p>

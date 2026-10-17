@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Bookmark, Bug, CheckSquare, ChevronDown, ChevronUp, ChevronsDown, ChevronsUp, GitBranch, Minus, Zap, MessageSquare, ListTree, type LucideIcon } from 'lucide-react';
+import { Bookmark, Bug, CheckSquare, ChevronDown, ChevronUp, ChevronsDown, ChevronsUp, GitBranch, Minus, Zap, MessageSquare, ListTree, Flag, Ban, type LucideIcon } from 'lucide-react';
 import { Avatar } from '../../components/ui/Avatar';
 import type { Issue, IssueType, JiraProjectDetail, Priority, Role, StatusCategory } from '../../lib/jiraTypes';
 
@@ -65,14 +65,17 @@ export function IssueKeyLink({ issue, bg }: { issue: Pick<Issue, 'key' | 'projec
 }
 
 /** Compact card used on the board and in the backlog. */
-export function IssueRow({ issue, onOpen, draggable, onDragStart, onDragEnd, dragging, compact }: {
+export function IssueRow({ issue, onOpen, draggable, onDragStart, onDragEnd, dragging, compact, selectMode, selected }: {
+  selectMode?: boolean; selected?: boolean;
   issue: Issue; onOpen: () => void; draggable?: boolean; onDragStart?: (e: React.DragEvent) => void; onDragEnd?: () => void; dragging?: boolean; compact?: boolean;
 }) {
   const overdue = issue.due_date && issue.status_category !== 'done' && issue.due_date < new Date().toISOString().slice(0, 10);
   return (
     <div data-card data-issue-id={issue.id} draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd}
       role="button" tabIndex={0} onClick={onOpen} onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}
-      className={`group cursor-pointer rounded-xl border border-line bg-surface p-3 text-sm shadow-sm transition hover:border-accent/50 hover:shadow-card focus-visible:ring-2 ${draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${dragging ? 'opacity-40' : ''}`}>
+      aria-pressed={selectMode ? !!selected : undefined}
+      className={`group cursor-pointer rounded-xl border bg-surface p-3 text-sm shadow-sm transition hover:border-accent/50 hover:shadow-card focus-visible:ring-2 ${selected ? 'border-accent ring-2 ring-accent/40' : 'border-line'} ${issue.flagged ? 'bg-danger/5' : ''} ${draggable && !selectMode ? 'cursor-grab active:cursor-grabbing' : ''} ${dragging ? 'opacity-40' : ''}`}>
+      {selectMode && <input type="checkbox" tabIndex={-1} readOnly checked={!!selected} aria-label={`Select ${issue.key}`} className="float-right ml-2 h-4 w-4 accent-[rgb(var(--accent))]" />}
       <p className={`line-clamp-3 font-medium ${issue.status_category === 'done' ? 'text-fg-muted line-through' : ''}`}>{issue.title}</p>
       {!compact && issue.labels?.length > 0 && <div className="mt-2 flex flex-wrap gap-1"><Labels labels={issue.labels} /></div>}
       {!compact && issue.parent && <p className="mt-2 truncate text-caption text-fg-muted" title={issue.parent.title}>{issue.parent.key} {issue.parent.title}</p>}
@@ -83,6 +86,8 @@ export function IssueRow({ issue, onOpen, draggable, onDragStart, onDragEnd, dra
         {issue.subtask_count > 0 && <span className="inline-flex items-center gap-0.5 text-caption" title="Subtasks done"><ListTree size={12} aria-hidden />{issue.subtasks_done}/{issue.subtask_count}</span>}
         {issue.comment_count > 0 && <span className="inline-flex items-center gap-0.5 text-caption" title="Comments"><MessageSquare size={12} aria-hidden />{issue.comment_count}</span>}
         {overdue && <span className="text-caption font-medium text-danger">Overdue</span>}
+        {issue.flagged && <span title="Flagged" className="text-danger"><Flag size={13} aria-hidden /><span className="sr-only">Flagged</span></span>}
+        {issue.blocked && <span title="Blocked by an open issue" className="text-danger"><Ban size={13} aria-hidden /><span className="sr-only">Blocked</span></span>}
         <span className="ml-auto flex items-center gap-1.5"><Points value={issue.story_points} /><UserDot user={issue.assignee} /></span>
       </div>
     </div>

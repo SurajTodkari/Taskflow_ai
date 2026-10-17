@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
-import { Pencil, Trash2, Copy, CalendarClock, SunMedium, Clock, MoreHorizontal, AlertCircle } from 'lucide-react';
+import { Pencil, Trash2, Copy, CalendarClock, SunMedium, Clock, MoreHorizontal, AlertCircle, UserPlus } from 'lucide-react';
 import type { Task } from '../lib/types';
 import { fmtDate, fmtTime, localISO, addDays } from '../lib/dates';
 import { useTaskActions } from '../lib/useTaskActions';
 import Modal from './Modal';
 import ConfirmDialog from './ConfirmDialog';
+import AssignToProject from './AssignToProject';
 
 export const PRIORITY_STYLE: Record<string, string> = {
   critical: 'bg-danger/15 text-danger',
@@ -60,6 +61,7 @@ export default function TaskCard({ task, onEdit, showCarryActions, compact, flat
   const [confirm, setConfirm] = useState(false);
   const [resched, setResched] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [assign, setAssign] = useState(false);
   const [optimistic, setOptimistic] = useState(false);
   const [gone, setGone] = useState(false);
   const [date, setDate] = useState(addDays(localISO(), 1));
@@ -115,6 +117,7 @@ export default function TaskCard({ task, onEdit, showCarryActions, compact, flat
                     <button role="menuitem" className={item} disabled={a.duplicate.isPending} onClick={() => { setMenu(false); a.duplicate.mutate(task); }}><Copy size={15} className="text-fg-muted" />Duplicate</button>
                     {!closed && <button role="menuitem" className={item} onClick={() => { setMenu(false); setResched(true); }}><CalendarClock size={15} className="text-fg-muted" />Reschedule</button>}
                     {!closed && <button role="menuitem" className={item} onClick={() => { setMenu(false); a.addToToday.mutate(task); }}><SunMedium size={15} className="text-fg-muted" />Add to today</button>}
+                    <button role="menuitem" className={item} onClick={() => { setMenu(false); setAssign(true); }}><UserPlus size={15} className="text-fg-muted" />Assign to project</button>
                     <div className="my-1 h-px bg-line" />
                     <button role="menuitem" className={`${item} !text-danger`} onClick={() => { setMenu(false); setConfirm(true); }}><Trash2 size={15} />Delete</button>
                   </motion.div>
@@ -148,6 +151,7 @@ export default function TaskCard({ task, onEdit, showCarryActions, compact, flat
       </div>
       <ConfirmDialog open={confirm} title="Delete task" message={`Delete "${task.title}"? This cannot be undone.`} busy={a.remove.isPending}
         onCancel={() => setConfirm(false)} onConfirm={() => a.remove.mutate(task, { onSuccess: () => setConfirm(false) })} />
+      {assign && <AssignToProject task={task} open={assign} onClose={() => setAssign(false)} />}
       <Modal open={resched} onClose={() => setResched(false)} title="Reschedule task"
         footer={<><button className="btn-ghost" onClick={() => setResched(false)}>Cancel</button>
           <button className="btn-primary" disabled={!date || a.rescheduleBoth.isPending}

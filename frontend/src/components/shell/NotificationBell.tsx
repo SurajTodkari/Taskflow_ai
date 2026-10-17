@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { notifIssuePath } from './JiraQuickSearch';
 import { Bell, CheckCheck } from 'lucide-react';
 import { api } from '../../lib/api';
 import type { AppNotification } from '../../lib/types';
@@ -13,6 +14,7 @@ function ago(iso: string) {
 const isRead = (n: AppNotification) => Boolean(n.read ?? n.is_read);
 
 export default function NotificationBell({ count }: { count: number }) {
+  const nav = useNavigate();
   const qc = useQueryClient();
   const list = useQuery({
     queryKey: ['notifications-latest'],
@@ -38,7 +40,7 @@ export default function NotificationBell({ count }: { count: number }) {
           {(list.data ?? []).length === 0 && <li className="px-4 py-8 text-center text-sm text-fg-muted">{list.isLoading ? 'Loading...' : "You're all caught up."}</li>}
           {(list.data ?? []).map((n) => (
             <li key={n.id} className="border-b border-line last:border-0">
-              <button className="flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-2" onClick={() => { if (!isRead(n)) read.mutate(n.id); }} aria-label={isRead(n) ? n.title : `${n.title} (unread, mark as read)`}>
+              <button className="flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-2" onClick={() => { if (!isRead(n)) read.mutate(n.id); const p = notifIssuePath(n); if (p) { close(); nav(p); } }} aria-label={isRead(n) ? n.title : `${n.title} (unread, mark as read)`}>
                 <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${isRead(n) ? 'bg-transparent' : 'bg-accent'}`} />
                 <span className="min-w-0 flex-1"><span className={`block truncate text-sm ${isRead(n) ? 'text-fg-muted' : 'font-medium'}`}>{n.title}</span>
                   <span className="line-clamp-2 text-xs text-fg-muted">{n.body ?? n.message}</span></span>

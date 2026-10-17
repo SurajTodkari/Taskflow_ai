@@ -5,6 +5,7 @@ from ..db import get_db
 from ..deps import get_current_user, get_prefs, limiter
 from ..models import User, UserPreferences
 from ..schemas import LoginIn, RefreshIn, RegisterIn, TokenOut
+from ..services import jira as jira_svc
 from ..security import (create_access_token, hash_password, issue_refresh_token, revoke_refresh_token,
                         rotate_refresh_token, verify_password)
 
@@ -23,6 +24,16 @@ def token_response(db: Session, u: User, refresh: str) -> dict:
             "user": user_out(db, u)}
 
 
+def _accept_invites(db: Session, u: User):
+    """Pending Jira project invites become memberships; must never break sign-up/login."""
+    try:
+        with db.begin_nested():
+            jira_svc.accept_invites(db, u)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("accepting jira invites failed")
+
+
 @router.post("/register", response_model=TokenOut, status_code=201)
 @limiter.limit("10/minute")
 def register(request: Request, body: RegisterIn, db: Session = Depends(get_db)):
@@ -34,6 +45,7 @@ def register(request: Request, body: RegisterIn, db: Session = Depends(get_db)):
     db.flush()
     db.add(UserPreferences(user_id=u.id, timezone=body.timezone))
     db.flush()
+    _accept_invites(db, u)
     refresh = issue_refresh_token(db, u.id)
     db.commit()
     db.refresh(u)
@@ -47,6 +59,7 @@ def login(request: Request, body: LoginIn, db: Session = Depends(get_db)):
     ok = verify_password(body.password, u.password_hash if u else _DUMMY_HASH)
     if not u or not ok or not u.is_active:
         raise HTTPException(401, "Invalid email or password")
+    _accept_invites(db, u)
     refresh = issue_refresh_token(db, u.id)
     db.commit()
     return token_response(db, u, refresh)

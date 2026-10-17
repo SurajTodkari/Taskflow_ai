@@ -11,6 +11,7 @@ import TopBar from './shell/TopBar';
 import SearchPalette from './shell/SearchPalette';
 import { titleFor } from './shell/nav';
 import { OfflineBanner } from './ui/OfflineBanner';
+import { JiraQuickSearch } from './shell/JiraQuickSearch';
 
 const KEY = 'sidebar-collapsed';
 function typing(e: KeyboardEvent) {
@@ -25,6 +26,7 @@ export default function Layout() {
   const reduce = useReducedMotion();
   const [drawer, setDrawer] = useState(false);
   const [search, setSearch] = useState(false);
+  const [jiraSearch, setJiraSearch] = useState(false);
   const [newTask, setNewTask] = useState(false);
   const [editTask, setEditTask] = useState<Task | null>(null);
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(KEY) === '1'; } catch { return false; } });
@@ -35,7 +37,9 @@ export default function Layout() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setSearch(true); return; }
       if (e.ctrlKey || e.metaKey || e.altKey || typing(e) || document.querySelector('[aria-modal="true"]')) return;
-      if (e.key === '/') { e.preventDefault(); setSearch(true); }
+      const inJira = location.pathname.startsWith('/jira');
+      if (e.key === '/') { e.preventDefault(); if (inJira) setJiraSearch(true); else setSearch(true); }
+      else if (e.key.toLowerCase() === 'c' && /^\/jira\/[^/]+/.test(location.pathname) && !location.pathname.startsWith('/jira/my-issues')) { e.preventDefault(); window.dispatchEvent(new Event('jira:create-issue')); }
       else if (e.key.toLowerCase() === 'n') { e.preventDefault(); setNewTask(true); }
     };
     document.addEventListener('keydown', onKey);
@@ -73,6 +77,7 @@ export default function Layout() {
         </main>
       </div>
       <BottomTabBar onMore={() => setDrawer(true)} unread={count} />
+      <JiraQuickSearch open={jiraSearch} onClose={() => setJiraSearch(false)} />
       <TaskModal open={newTask} onClose={() => setNewTask(false)} />
       <TaskModal open={!!editTask} task={editTask} onClose={() => setEditTask(null)} />
     </div>

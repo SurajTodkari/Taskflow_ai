@@ -130,7 +130,7 @@ def health():
 for _name in ("auth", "tasks", "projects", "settings"):
     app.include_router(importlib.import_module(f"app.routers.{_name}").router)
 
-for _name in ("dashboard", "notifications", "reports", "analytics", "ai", "calendar", "ws", "jira"):
+for _name in ("dashboard", "notifications", "reports", "analytics", "ai", "calendar", "ws", "jira", "jira_extra", "jira_ops"):
     try:
         _mod = importlib.import_module(f"app.routers.{_name}")
         app.include_router(_mod.router)

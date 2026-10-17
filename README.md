@@ -14,3 +14,6 @@ members, comments, notifications) under `/api/jira`.
 `render.yaml` defines one Docker web service (API + built frontend) and one free Postgres; the worker runs
 inside the API process because free plans have no cron jobs. See [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)
 for steps and free-tier caveats (sleeps after 15 min idle, free Postgres expires after ~30 days, ephemeral uploads).
+
+## Jira module v2 (backend)
+Adds invitations (pending invites auto-accepted on sign-up/login), issue links, watchers and `@[user:ID]` mentions, components, versions/releases, time tracking, DB-stored attachments, JQL-lite search with saved filters (`GET /api/jira/search?jql=`), workflow transitions and WIP limits, kanban projects, custom fields, roadmap/reports/activity/dashboard, bulk edit, clone, move between projects and CSV import/export. Optional SMTP email is configured through `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TLS` (see `RENDER_DEPLOYMENT.md`). Tests: `backend/tests/test_jira2.py`.

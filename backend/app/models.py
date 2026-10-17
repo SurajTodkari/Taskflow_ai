@@ -1,6 +1,6 @@
 from datetime import date, datetime, time, timezone
 
-from sqlalchemy import (JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String,
+from sqlalchemy import (JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String,
                         Text, Time, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,6 +50,7 @@ class UserPreferences(TS, Base):
     notify_reminders: Mapped[bool] = mapped_column(Boolean, default=True)
     notify_overdue: Mapped[bool] = mapped_column(Boolean, default=True)
     recurring_defaults: Mapped[dict] = mapped_column(JSON, default=dict)
+    jira_email_notifications: Mapped[bool] = mapped_column(Boolean, default=True)
     user = relationship("User", back_populates="preferences")
 
 
@@ -255,6 +256,11 @@ class JiraProject(TS, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     lead_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     issue_seq: Mapped[int] = mapped_column(Integer, default=0)
+    board_type: Mapped[str] = mapped_column(String(10), default="scrum")  # scrum | kanban
+    enforce_workflow: Mapped[bool] = mapped_column(Boolean, default=False)
+    default_assignee_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                                            nullable=True)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class JiraMember(TS, Base):
@@ -273,6 +279,7 @@ class JiraColumn(TS, Base):
     name: Mapped[str] = mapped_column(String(60))
     category: Mapped[str] = mapped_column(String(15), default="todo")  # todo | in_progress | done
     position: Mapped[int] = mapped_column(Integer, default=0)
+    wip_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class JiraSprint(TS, Base):
@@ -310,6 +317,15 @@ class JiraIssue(TS, Base):
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     rank: Mapped[float] = mapped_column(Float, default=0.0)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    original_estimate_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    remaining_estimate_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    flagged: Mapped[bool] = mapped_column(Boolean, default=False)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    fix_version_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("jira_versions.id", ondelete="SET NULL"),
+                                                       nullable=True, index=True)
+    custom_fields: Mapped[dict] = mapped_column(JSON, default=dict)
+    environment: Mapped[str | None] = mapped_column(Text, nullable=True)
     __table_args__ = (UniqueConstraint("project_id", "number", name="uq_jira_issue_number"),)
 
 
@@ -329,3 +345,121 @@ class JiraHistory(TS, Base):
     field: Mapped[str] = mapped_column(String(40))
     old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+def _pk():
+    return mapped_column(Integer, ForeignKey("jira_projects.id", ondelete="CASCADE"), index=True)
+
+
+class JiraInvite(TS, Base):
+    __tablename__ = "jira_invites"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = _pk()
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    role: Mapped[str] = mapped_column(String(10), default="member")
+    invited_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                                   nullable=True)
+    __table_args__ = (UniqueConstraint("project_id", "email", name="uq_jira_invite"),)
+
+
+class JiraVersion(TS, Base):
+    __tablename__ = "jira_versions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = _pk()
+    name: Mapped[str] = mapped_column(String(60))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    released: Mapped[bool] = mapped_column(Boolean, default=False)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_jira_version_name"),)
+
+
+class JiraComponent(TS, Base):
+    __tablename__ = "jira_components"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = _pk()
+    name: Mapped[str] = mapped_column(String(60))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lead_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                                nullable=True)
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_jira_component_name"),)
+
+
+class JiraIssueComponent(Base):
+    __tablename__ = "jira_issue_components"
+    issue_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"),
+                                          primary_key=True)
+    component_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_components.id", ondelete="CASCADE"),
+                                              primary_key=True)
+
+
+class JiraLink(TS, Base):
+    __tablename__ = "jira_links"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"), index=True)
+    target_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"), index=True)
+    link_type: Mapped[str] = mapped_column(String(15))  # blocks | relates | duplicates | clones
+    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"),
+                                                   nullable=True)
+    __table_args__ = (UniqueConstraint("source_id", "target_id", "link_type", name="uq_jira_link"),)
+
+
+class JiraWatcher(TS, Base):
+    __tablename__ = "jira_watchers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = fk_user()
+    __table_args__ = (UniqueConstraint("issue_id", "user_id", name="uq_jira_watcher"),)
+
+
+class JiraWorklog(TS, Base):
+    __tablename__ = "jira_worklogs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = fk_user()
+    seconds: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class JiraAttachment(TS, Base):
+    __tablename__ = "jira_attachments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_issues.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = fk_user()
+    filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(100))
+    size: Mapped[int] = mapped_column(Integer)
+    data: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
+
+
+class JiraFilter(TS, Base):
+    __tablename__ = "jira_filters"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    jql: Mapped[str] = mapped_column(Text, default="")
+    shared: Mapped[bool] = mapped_column(Boolean, default=False)
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("jira_projects.id", ondelete="CASCADE"),
+                                                   nullable=True, index=True)
+
+
+class JiraTransition(Base):
+    __tablename__ = "jira_transitions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = _pk()
+    from_column_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_columns.id", ondelete="CASCADE"))
+    to_column_id: Mapped[int] = mapped_column(Integer, ForeignKey("jira_columns.id", ondelete="CASCADE"))
+    __table_args__ = (UniqueConstraint("project_id", "from_column_id", "to_column_id", name="uq_jira_transition"),)
+
+
+class JiraCustomField(TS, Base):
+    __tablename__ = "jira_custom_fields"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = _pk()
+    name: Mapped[str] = mapped_column(String(60))
+    field_type: Mapped[str] = mapped_column(String(10))  # text | number | select | date | checkbox
+    options: Mapped[list] = mapped_column(JSON, default=list)
+    required: Mapped[bool] = mapped_column(Boolean, default=False)
+    position: Mapped[int] = mapped_column(Integer, default=0)

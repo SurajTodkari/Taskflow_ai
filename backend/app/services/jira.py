@@ -7,8 +7,13 @@ from fastapi import HTTPException
 from sqlalchemy import String, case, cast, func, or_, update
 from sqlalchemy.orm import Session
 
-from ..models import (JiraColumn, JiraComment, JiraHistory, JiraIssue, JiraMember, JiraProject, JiraSprint,
-                      User)
+import json
+import re as _re
+
+from ..models import (JiraColumn, JiraComment, JiraComponent, JiraCustomField, JiraHistory, JiraIssue,
+                      JiraIssueComponent, JiraLink, JiraMember, JiraProject, JiraSprint, JiraTransition,
+                      JiraVersion, JiraWatcher, JiraWorklog, JiraAttachment, User)
+from . import mailer
 from . import notifications as notif
 from .tasks import aware
 
@@ -37,12 +42,20 @@ def get_member(db: Session, project_id: int, user_id: int) -> JiraMember | None:
     return db.query(JiraMember).filter_by(project_id=project_id, user_id=user_id).first()
 
 
-def project_for(db: Session, user: User, key: str, min_role: str = "viewer") -> tuple[JiraProject, str]:
+def check_writable(p: JiraProject):
+    if p.archived:
+        raise HTTPException(409, "Project is archived and read-only")
+
+
+def project_for(db: Session, user: User, key: str, min_role: str = "viewer",
+                allow_archived: bool = False) -> tuple[JiraProject, str]:
     p = db.query(JiraProject).filter(JiraProject.key == key.strip().upper()).first()
     m = get_member(db, p.id, user.id) if p else None
     if not p or not m:  # non-members must not learn the project exists
         raise HTTPException(404, "Project not found")
     require_role(m.role, min_role)
+    if min_role != "viewer" and not allow_archived:
+        check_writable(p)
     return p, m.role
 
 
@@ -137,12 +150,25 @@ def _uniq() -> str:
     return str(time.time_ns())
 
 
+def _name(db: Session, uid: int | None) -> str:
+    u = db.get(User, uid) if uid else None
+    return u.name if u else "nobody"
+
+
 def notify_assigned(db: Session, project: JiraProject, issue: JiraIssue, actor: User):
     if issue.assignee_id and issue.assignee_id != actor.id:
         k = issue_key(project, issue)
         notif.create_notification(
             db, issue.assignee_id, "jira", f"{k} assigned to you", f"{actor.name} assigned you: {issue.title}",
             {"issue_key": k}, dedupe_key=f"jira:assigned:{issue.id}:{issue.assignee_id}:{_uniq()}")
+        mailer.notify_user(db, issue.assignee_id, f"[{k}] assigned to you",
+                           f"{actor.name} assigned you {k}: {issue.title}")
+        add_watcher(db, issue.id, issue.assignee_id)
+        notify_watchers(db, project, issue, actor, f"{k} assigned to {_name(db, issue.assignee_id)}",
+                        f"{actor.name} assigned {k} to {_name(db, issue.assignee_id)}: {issue.title}",
+                        exclude={issue.assignee_id})
+    elif issue.assignee_id:
+        add_watcher(db, issue.id, issue.assignee_id)
 
 
 def notify_added(db: Session, project: JiraProject, user_id: int, actor: User, role: str):
@@ -153,14 +179,82 @@ def notify_added(db: Session, project: JiraProject, user_id: int, actor: User, r
             dedupe_key=f"jira:member:{project.id}:{user_id}:{_uniq()}")
 
 
+# ---- watchers / mentions
+MENTION_RE = _re.compile(r"@\[user:(\d+)\]")
+
+
+def mention_ids(body: str) -> list[int]:
+    seen: list[int] = []
+    for m in MENTION_RE.finditer(body or ""):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def add_watcher(db: Session, issue_id: int, user_id: int | None):
+    if user_id is None:
+        return
+    if db.query(JiraWatcher.id).filter_by(issue_id=issue_id, user_id=user_id).first() is None:
+        db.add(JiraWatcher(issue_id=issue_id, user_id=user_id))
+        db.flush()
+
+
+def watcher_ids(db: Session, project: JiraProject, issue: JiraIssue) -> set[int]:
+    """Watchers who are still project members."""
+    ids = {r[0] for r in db.query(JiraWatcher.user_id).filter_by(issue_id=issue.id).all()}
+    if not ids:
+        return set()
+    ok = {r[0] for r in db.query(JiraMember.user_id).filter(JiraMember.project_id == project.id,
+                                                            JiraMember.user_id.in_(ids)).all()}
+    return ok
+
+
+def notify_watchers(db: Session, project: JiraProject, issue: JiraIssue, actor: User, title: str, body: str,
+                    exclude: set[int] = frozenset()):
+    k = issue_key(project, issue)
+    for uid in watcher_ids(db, project, issue) - {actor.id} - set(exclude):
+        notif.create_notification(db, uid, "jira", title, body, {"issue_key": k},
+                                  dedupe_key=f"jira:watch:{issue.id}:{uid}:{_uniq()}")
+
+
+def notify_status(db: Session, project: JiraProject, issue: JiraIssue, actor: User, old: str | None, new: str):
+    k = issue_key(project, issue)
+    notify_watchers(db, project, issue, actor, f"{k} moved to {new}",
+                    f"{actor.name} changed status from {old or '-'} to {new}: {issue.title}")
+
+
 def notify_comment(db: Session, project: JiraProject, issue: JiraIssue, comment: JiraComment, actor: User):
     k = issue_key(project, issue)
-    for uid in {issue.assignee_id, issue.reporter_id} - {None, actor.id}:
+    mentioned = notify_mentions(db, project, issue, comment, actor)
+    recipients = ({issue.assignee_id, issue.reporter_id} | watcher_ids(db, project, issue)) - {None, actor.id}
+    for uid in recipients - mentioned:
         if not get_member(db, project.id, uid):
             continue
         notif.create_notification(
             db, uid, "jira", f"New comment on {k}", f"{actor.name}: {comment.body[:140]}", {"issue_key": k},
             dedupe_key=f"jira:comment:{comment.id}:{uid}")
+
+
+def notify_mentions(db: Session, project: JiraProject, issue: JiraIssue, comment: JiraComment,
+                    actor: User) -> set[int]:
+    """Notify mentioned project members (deduped per comment+user) and auto-watch them. Returns their ids."""
+    k = issue_key(project, issue)
+    out: set[int] = set()
+    for uid in mention_ids(comment.body):
+        if not get_member(db, project.id, uid):
+            continue
+        add_watcher(db, issue.id, uid)
+        if uid == actor.id:
+            continue
+        out.add(uid)
+        n = notif.create_notification(
+            db, uid, "jira", f"{actor.name} mentioned you on {k}", comment.body[:140], {"issue_key": k},
+            dedupe_key=f"jira:mention:{comment.id}:{uid}")
+        if n is not None:
+            mailer.notify_user(db, uid, f"[{k}] {actor.name} mentioned you",
+                               f"{actor.name} mentioned you on {k} ({issue.title}):" + chr(10) * 2 + comment.body[:500])
+    return out
 
 
 # ------------------------------------------------------------------ ranking
@@ -228,10 +322,19 @@ def sprint_name(db: Session, sprint_id: int | None) -> str | None:
 
 
 # ------------------------------------------------------------------ serialization
-def serialize_issues(db: Session, issues: list[JiraIssue], detail: bool = False) -> list[dict]:
+LINK_LABELS = {  # (link_type, is_source) -> label
+    ("blocks", True): "blocks", ("blocks", False): "is blocked by",
+    ("relates", True): "relates to", ("relates", False): "relates to",
+    ("duplicates", True): "duplicates", ("duplicates", False): "is duplicated by",
+    ("clones", True): "clones", ("clones", False): "is cloned by"}
+
+
+def serialize_issues(db: Session, issues: list[JiraIssue], detail: bool = False,
+                     viewer: User | None = None) -> list[dict]:
     if not issues:
         return []
     ids = [i.id for i in issues]
+    idset = set(ids)
     pids = {i.project_id for i in issues}
     projects = {p.id: p for p in db.query(JiraProject).filter(JiraProject.id.in_(pids)).all()}
     cols = {c.id: c for c in db.query(JiraColumn).filter(JiraColumn.project_id.in_(pids)).all()}
@@ -249,11 +352,77 @@ def serialize_issues(db: Session, issues: list[JiraIssue], detail: bool = False)
                     .group_by(JiraIssue.parent_id).all())
     comments = dict(db.query(JiraComment.issue_id, func.count(JiraComment.id))
                     .filter(JiraComment.issue_id.in_(ids)).group_by(JiraComment.issue_id).all())
+    # v2 batches
+    comps: dict[int, list] = {}
+    for iid, cid, cname in (db.query(JiraIssueComponent.issue_id, JiraComponent.id, JiraComponent.name)
+                            .join(JiraComponent, JiraComponent.id == JiraIssueComponent.component_id)
+                            .filter(JiraIssueComponent.issue_id.in_(ids)).order_by(JiraComponent.name).all()):
+        comps.setdefault(iid, []).append({"id": cid, "name": cname})
+    vids = {i.fix_version_id for i in issues if i.fix_version_id}
+    versions = {v.id: v for v in db.query(JiraVersion).filter(JiraVersion.id.in_(vids)).all()} if vids else {}
+    watch_count = dict(db.query(JiraWatcher.issue_id, func.count(JiraWatcher.id))
+                       .filter(JiraWatcher.issue_id.in_(ids)).group_by(JiraWatcher.issue_id).all())
+    watching = ({r[0] for r in db.query(JiraWatcher.issue_id).filter(JiraWatcher.issue_id.in_(ids),
+                                                                   JiraWatcher.user_id == viewer.id).all()}
+                if viewer else set())
+    spent = dict(db.query(JiraWorklog.issue_id, func.coalesce(func.sum(JiraWorklog.seconds), 0))
+                 .filter(JiraWorklog.issue_id.in_(ids)).group_by(JiraWorklog.issue_id).all())
+    att = dict(db.query(JiraAttachment.issue_id, func.count(JiraAttachment.id))
+               .filter(JiraAttachment.issue_id.in_(ids)).group_by(JiraAttachment.issue_id).all())
+    # links (+ blocked flag)
+    link_rows = (db.query(JiraLink).filter(or_(JiraLink.source_id.in_(ids), JiraLink.target_id.in_(ids))).all())
+    other_ids = {x for l in link_rows for x in (l.source_id, l.target_id)} - set(ids)
+    others = {o.id: o for o in db.query(JiraIssue).filter(JiraIssue.id.in_(other_ids)).all()} if other_ids else {}
+    by_id = {i.id: i for i in issues}
+    by_id.update(others)
+    opids = {o.project_id for o in others.values()} - set(projects)
+    all_projects = dict(projects)
+    if opids:
+        all_projects.update({p.id: p for p in db.query(JiraProject).filter(JiraProject.id.in_(opids)).all()})
+        cols.update({c.id: c for c in db.query(JiraColumn).filter(JiraColumn.project_id.in_(opids)).all()})
+    visible = None
+    if viewer is not None:
+        visible = {r[0] for r in db.query(JiraMember.project_id).filter(JiraMember.user_id == viewer.id).all()}
+    links: dict[int, list] = {}
+    blocked: set[int] = set()
+    for l in link_rows:
+        for me, other, is_src in ((l.source_id, l.target_id, True), (l.target_id, l.source_id, False)):
+            if me not in idset:
+                continue
+            o = by_id.get(other)
+            if o is None:
+                continue
+            oc = cols.get(o.column_id)
+            if l.link_type == "blocks" and not is_src and oc is not None and oc.category != "done":
+                blocked.add(me)
+            if visible is not None and o.project_id not in visible:
+                continue
+            op = all_projects.get(o.project_id)
+            links.setdefault(me, []).append({
+                "id": l.id, "link_type": l.link_type, "direction_label": LINK_LABELS[(l.link_type, is_src)],
+                "issue": {"id": o.id, "key": f"{op.key}-{o.number}" if op else str(o.id), "title": o.title,
+                          "status_name": oc.name if oc else None, "status_category": oc.category if oc else None,
+                          "type": o.type}})
+    trans: dict[int, dict[int, set]] = {}
+    enforced = [p.id for p in projects.values() if p.enforce_workflow]
+    if enforced:
+        for t in db.query(JiraTransition).filter(JiraTransition.project_id.in_(enforced)).all():
+            trans.setdefault(t.project_id, {}).setdefault(t.from_column_id, set()).add(t.to_column_id)
+    proj_cols: dict[int, list] = {}
+    for c in sorted(cols.values(), key=lambda c: (c.position, c.id)):
+        proj_cols.setdefault(c.project_id, []).append(c.id)
     out = []
     for i in issues:
         proj = projects[i.project_id]
         col = cols.get(i.column_id)
         par = parents.get(i.parent_id)
+        ver = versions.get(i.fix_version_id)
+        clist = comps.get(i.id, [])
+        if proj.enforce_workflow:
+            allowed = [c for c in proj_cols.get(proj.id, [])
+                       if c == i.column_id or c in trans.get(proj.id, {}).get(i.column_id, set())]
+        else:
+            allowed = proj_cols.get(proj.id, [])
         d = {"id": i.id, "key": f"{proj.key}-{i.number}", "number": i.number, "project_key": proj.key,
              "type": i.type, "title": i.title, "description": i.description, "column_id": i.column_id,
              "status_name": col.name if col else None, "status_category": col.category if col else None,
@@ -265,20 +434,40 @@ def serialize_issues(db: Session, issues: list[JiraIssue], detail: bool = False)
              "due_date": i.due_date, "rank": i.rank, "resolved_at": aware(i.resolved_at),
              "created_at": aware(i.created_at), "updated_at": aware(i.updated_at),
              "subtask_count": sub_total.get(i.id, 0), "subtasks_done": sub_done.get(i.id, 0),
-             "comment_count": comments.get(i.id, 0)}
+             "comment_count": comments.get(i.id, 0),
+             "start_date": i.start_date, "original_estimate_min": i.original_estimate_min,
+             "remaining_estimate_min": i.remaining_estimate_min, "flagged": bool(i.flagged),
+             "archived": bool(i.archived), "fix_version_id": i.fix_version_id,
+             "fix_version": {"id": ver.id, "name": ver.name} if ver else None,
+             "custom_fields": dict(i.custom_fields or {}), "environment": i.environment,
+             "component_ids": [c["id"] for c in clist], "components": clist,
+             "watchers_count": watch_count.get(i.id, 0), "is_watching": i.id in watching,
+             "time_spent_min": int(spent.get(i.id, 0)) // 60, "links": links.get(i.id, []),
+             "attachment_count": att.get(i.id, 0), "blocked": i.id in blocked,
+             "allowed_column_ids": allowed}
         out.append(d)
     if detail:
+        atts: dict[int, list] = {}
+        arows = (db.query(JiraAttachment.id, JiraAttachment.issue_id, JiraAttachment.filename,
+                          JiraAttachment.size, JiraAttachment.content_type, JiraAttachment.user_id,
+                          JiraAttachment.created_at)
+                 .filter(JiraAttachment.issue_id.in_(ids)).order_by(JiraAttachment.id).all())
+        au = {u.id: u for u in db.query(User).filter(User.id.in_({r[5] for r in arows})).all()} if arows else {}
+        for aid, iid, fn, size, ct, uid_, ca in arows:
+            atts.setdefault(iid, []).append({"id": aid, "filename": fn, "size": size, "content_type": ct,
+                                             "user": user_ref(au.get(uid_)), "created_at": aware(ca)})
         for d, i in zip(out, issues):
             kids = (db.query(JiraIssue).filter(JiraIssue.parent_id == i.id, JiraIssue.type == "subtask")
                     .order_by(JiraIssue.rank, JiraIssue.id).all())
-            d["subtasks"] = serialize_issues(db, kids)
+            d["subtasks"] = serialize_issues(db, kids, viewer=viewer)
             d["epic_children_count"] = (db.query(func.count(JiraIssue.id))
                                         .filter(JiraIssue.parent_id == i.id).scalar() if i.type == "epic" else 0)
+            d["attachments"] = atts.get(i.id, [])
     return out
 
 
-def serialize_issue(db: Session, issue: JiraIssue, detail: bool = False) -> dict:
-    return serialize_issues(db, [issue], detail)[0]
+def serialize_issue(db: Session, issue: JiraIssue, detail: bool = False, viewer: User | None = None) -> dict:
+    return serialize_issues(db, [issue], detail, viewer)[0]
 
 
 def sprint_out(db: Session, s: JiraSprint) -> dict:
@@ -303,26 +492,42 @@ def active_sprint(db: Session, project_id: int) -> JiraSprint | None:
 def project_out(db: Session, p: JiraProject, role: str, detail: bool = False) -> dict:
     lead = db.get(User, p.lead_id) if p.lead_id else None
     done_ids = [c.id for c in db.query(JiraColumn.id).filter_by(project_id=p.id, category="done").all()]
-    issue_count = db.query(func.count(JiraIssue.id)).filter(JiraIssue.project_id == p.id).scalar() or 0
+    issue_count = (db.query(func.count(JiraIssue.id))
+                   .filter(JiraIssue.project_id == p.id, JiraIssue.archived.is_(False)).scalar() or 0)
     done_count = (db.query(func.count(JiraIssue.id))
-                  .filter(JiraIssue.project_id == p.id, JiraIssue.column_id.in_(done_ids or [-1])).scalar() or 0)
+                  .filter(JiraIssue.project_id == p.id, JiraIssue.archived.is_(False),
+                          JiraIssue.column_id.in_(done_ids or [-1])).scalar() or 0)
     members = db.query(func.count(JiraMember.id)).filter(JiraMember.project_id == p.id).scalar() or 0
     act = active_sprint(db, p.id)
     out = {"id": p.id, "key": p.key, "name": p.name, "description": p.description, "lead": user_ref(lead),
            "my_role": role, "member_count": members, "issue_count": issue_count,
            "open_issue_count": issue_count - done_count,
            "active_sprint": {"id": act.id, "name": act.name} if act else None,
+           "board_type": p.board_type or "scrum", "enforce_workflow": bool(p.enforce_workflow),
+           "default_assignee_id": p.default_assignee_id, "archived": bool(p.archived),
            "created_at": aware(p.created_at), "updated_at": aware(p.updated_at)}
     if detail:
         out["columns"] = [column_out(c) for c in project_columns(db, p.id)]
         out["members"] = member_list(db, p.id)
         out["sprints"] = [sprint_out(db, s) for s in project_sprints(db, p.id)]
+        out["components"] = [{"id": c.id, "name": c.name} for c in
+                             db.query(JiraComponent).filter_by(project_id=p.id).order_by(JiraComponent.name)]
+        out["versions"] = [{"id": v.id, "name": v.name, "released": bool(v.released)} for v in
+                           db.query(JiraVersion).filter_by(project_id=p.id).order_by(JiraVersion.id)]
+        out["custom_fields"] = [custom_field_out(f) for f in
+                                db.query(JiraCustomField).filter_by(project_id=p.id)
+                                .order_by(JiraCustomField.position, JiraCustomField.id)]
     return out
 
 
 def column_out(c: JiraColumn) -> dict:
     return {"id": c.id, "project_id": c.project_id, "name": c.name, "category": c.category,
-            "position": c.position}
+            "position": c.position, "wip_limit": c.wip_limit}
+
+
+def custom_field_out(f: JiraCustomField) -> dict:
+    return {"id": f.id, "project_id": f.project_id, "name": f.name, "field_type": f.field_type,
+            "options": list(f.options or []), "required": bool(f.required), "position": f.position}
 
 
 def member_list(db: Session, project_id: int) -> list[dict]:
@@ -337,20 +542,132 @@ def member_out(m: JiraMember, u: User) -> dict:
 
 def comment_out(c: JiraComment, key: str, users: dict) -> dict:
     return {"id": c.id, "issue_key": key, "user": user_ref(users.get(c.user_id)), "body": c.body,
+            "mentions": [user_ref(users[n]) for n in mention_ids(c.body) if n in users],
             "created_at": aware(c.created_at), "updated_at": aware(c.updated_at)}
 
 
 # ------------------------------------------------------------------ project / issue operations
-def create_project(db: Session, user: User, key: str, name: str, description: str | None) -> JiraProject:
-    p = JiraProject(key=key, name=name, description=description, lead_id=user.id, issue_seq=0)
+def accept_invites(db: Session, user: User) -> int:
+    """Convert pending invites for the user's email into memberships (idempotent)."""
+    from ..models import JiraInvite
+    invs = db.query(JiraInvite).filter(JiraInvite.email == user.email.lower()).all()
+    n = 0
+    for inv in invs:
+        proj = db.get(JiraProject, inv.project_id)
+        if proj is not None and not get_member(db, proj.id, user.id):
+            db.add(JiraMember(project_id=proj.id, user_id=user.id, role=inv.role))
+            inviter = db.get(User, inv.invited_by) if inv.invited_by else None
+            notif.create_notification(
+                db, user.id, "jira", f"Added to project {proj.key}",
+                f"{inviter.name if inviter else 'Someone'} added you to {proj.name} as {inv.role}",
+                {"project_key": proj.key}, dedupe_key=f"jira:invite:{inv.id}")
+            n += 1
+        db.delete(inv)
+    if invs:
+        db.flush()
+    return n
+
+
+def create_project(db: Session, user: User, key: str, name: str, description: str | None,
+                   board_type: str = "scrum") -> JiraProject:
+    p = JiraProject(key=key, name=name, description=description, lead_id=user.id, issue_seq=0,
+                    board_type=board_type)
     db.add(p)
     db.flush()
     db.add(JiraMember(project_id=p.id, user_id=user.id, role="admin"))
     for n, (cname, cat) in enumerate(DEFAULT_COLUMNS):
         db.add(JiraColumn(project_id=p.id, name=cname, category=cat, position=n))
-    db.add(JiraSprint(project_id=p.id, name="Sprint 1", state="planned"))
+    if board_type != "kanban":
+        db.add(JiraSprint(project_id=p.id, name="Sprint 1", state="planned"))
     db.flush()
     return p
+
+
+# ------------------------------------------------------------------ v2 field helpers
+def check_version(db: Session, project: JiraProject, version_id: int | None) -> JiraVersion | None:
+    if version_id is None:
+        return None
+    v = db.get(JiraVersion, version_id)
+    if not v or v.project_id != project.id:
+        raise HTTPException(422, "fix_version_id does not belong to this project")
+    return v
+
+
+def check_components(db: Session, project: JiraProject, ids: list[int]) -> list[JiraComponent]:
+    ids = list(dict.fromkeys(ids or []))
+    if not ids:
+        return []
+    rows = db.query(JiraComponent).filter(JiraComponent.project_id == project.id, JiraComponent.id.in_(ids)).all()
+    if len(rows) != len(ids):
+        raise HTTPException(422, "component_ids must all belong to this project")
+    return sorted(rows, key=lambda c: c.name)
+
+
+def issue_components(db: Session, issue: JiraIssue) -> list[JiraComponent]:
+    return (db.query(JiraComponent).join(JiraIssueComponent, JiraIssueComponent.component_id == JiraComponent.id)
+            .filter(JiraIssueComponent.issue_id == issue.id).order_by(JiraComponent.name).all())
+
+
+def set_components(db: Session, issue: JiraIssue, comps: list[JiraComponent]):
+    db.query(JiraIssueComponent).filter(JiraIssueComponent.issue_id == issue.id).delete(synchronize_session=False)
+    for c in comps:
+        db.add(JiraIssueComponent(issue_id=issue.id, component_id=c.id))
+    db.flush()
+
+
+def validate_custom_fields(db: Session, project: JiraProject, values: dict, base: dict | None = None,
+                           require: bool = False) -> dict:
+    """Type-check `values` against project field definitions and merge them onto `base`.
+    A null value clears a field. With require=True every required field must end up set."""
+    defs = {str(f.id): f for f in db.query(JiraCustomField).filter_by(project_id=project.id).all()}
+    out = dict(base or {})
+    for k, v in (values or {}).items():
+        k = str(k)
+        f = defs.get(k)
+        if f is None:
+            raise HTTPException(422, f"Unknown custom field {k}")
+        if v is None or v == "":
+            out.pop(k, None)
+            continue
+        t = f.field_type
+        if t == "text":
+            if not isinstance(v, str) or len(v) > 5000:
+                raise HTTPException(422, f"{f.name}: expected text up to 5000 characters")
+        elif t == "number":
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise HTTPException(422, f"{f.name}: expected a number")
+        elif t == "select":
+            if v not in (f.options or []):
+                raise HTTPException(422, f"{f.name}: must be one of {', '.join(f.options or [])}")
+        elif t == "date":
+            try:
+                date.fromisoformat(str(v))
+            except ValueError:
+                raise HTTPException(422, f"{f.name}: expected a date YYYY-MM-DD")
+        elif t == "checkbox":
+            if not isinstance(v, bool):
+                raise HTTPException(422, f"{f.name}: expected true or false")
+        out[k] = v
+    if require:
+        for k, f in defs.items():
+            if f.required and k not in out:
+                raise HTTPException(422, f"{f.name} is required")
+    return out
+
+
+def check_transition(db: Session, project: JiraProject, from_id: int, to_id: int):
+    """409 listing allowed targets when the project enforces its workflow."""
+    if not project.enforce_workflow or from_id == to_id:
+        return
+    ok = db.query(JiraTransition.id).filter_by(project_id=project.id, from_column_id=from_id,
+                                              to_column_id=to_id).first()
+    if ok:
+        return
+    targets = {t.to_column_id for t in db.query(JiraTransition).filter_by(project_id=project.id,
+                                                                         from_column_id=from_id).all()}
+    allowed = [c.name for c in project_columns(db, project.id) if c.id in targets]
+    raise HTTPException(409, "Transition not allowed by the workflow. Allowed targets: "
+                        + (", ".join(allowed) if allowed else "none"))
 
 
 def create_issue(db: Session, project: JiraProject, user: User, data: dict) -> JiraIssue:
@@ -360,11 +677,20 @@ def create_issue(db: Session, project: JiraProject, user: User, data: dict) -> J
         col = column_in_project(db, project, data["column_id"])
     else:
         col = project_columns(db, project.id)[0]
+    if "assignee_id" not in data and project.default_assignee_id and get_member(db, project.id,
+                                                                             project.default_assignee_id):
+        data = {**data, "assignee_id": project.default_assignee_id}
     check_assignee(db, project, data.get("assignee_id"))
-    if "sprint_id" in data:
+    check_version(db, project, data.get("fix_version_id"))
+    comps = check_components(db, project, data.get("component_ids") or [])
+    cfields = validate_custom_fields(db, project, data.get("custom_fields") or {}, require=True)
+    kanban = project.board_type == "kanban"
+    if kanban:
+        sprint_id = None
+    elif "sprint_id" in data:
         sprint_id = data["sprint_id"]
         check_sprint(db, project, sprint_id)
-    elif parent is not None and itype == "subtask" and parent.sprint_id:
+    elif parent is not None and itype == "subtask" and parent.sprint_id and not kanban:
         ps = db.get(JiraSprint, parent.sprint_id)
         sprint_id = parent.sprint_id if ps and ps.state != "closed" else None
     else:
@@ -377,20 +703,29 @@ def create_issue(db: Session, project: JiraProject, user: User, data: dict) -> J
                       priority=data.get("priority", "medium"), assignee_id=data.get("assignee_id"),
                       reporter_id=user.id, parent_id=data.get("parent_id"), sprint_id=sprint_id,
                       story_points=data.get("story_points"), labels=data.get("labels") or [],
-                      due_date=data.get("due_date"), rank=next_rank(db, project.id))
+                      due_date=data.get("due_date"), rank=next_rank(db, project.id),
+                      start_date=data.get("start_date"), original_estimate_min=data.get("original_estimate_min"),
+                      remaining_estimate_min=data.get("remaining_estimate_min", data.get("original_estimate_min")),
+                      flagged=bool(data.get("flagged", False)), archived=bool(data.get("archived", False)),
+                      fix_version_id=data.get("fix_version_id"), custom_fields=cfields,
+                      environment=data.get("environment"))
     set_resolved(issue, col)
     db.add(issue)
     db.flush()
+    set_components(db, issue, comps)
+    add_watcher(db, issue.id, user.id)
     notify_assigned(db, project, issue, user)
     return issue
 
 
-_SIMPLE = ("title", "description", "priority", "story_points", "due_date")
+_SIMPLE: tuple = ("title", "description", "priority", "story_points", "due_date")
 
 
 def update_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User, data: dict):
     """Apply a PATCH dict (only the provided keys), writing history rows for every changed field."""
-    for k in ("type", "title", "priority", "column_id"):
+    if project.board_type == "kanban":
+        data.pop("sprint_id", None)
+    for k in ("type", "title", "priority", "column_id", "flagged", "archived", "component_ids", "custom_fields"):
         if k in data and data[k] is None:
             raise HTTPException(422, f"{k} cannot be null")
     if "type" in data or "parent_id" in data:
@@ -406,9 +741,17 @@ def update_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User
     if "sprint_id" in data and data["sprint_id"] != issue.sprint_id:
         check_sprint(db, project, data["sprint_id"])
     new_col = column_in_project(db, project, data["column_id"]) if "column_id" in data else None
+    if new_col is not None:
+        check_transition(db, project, issue.column_id, new_col.id)
+    if "fix_version_id" in data:
+        check_version(db, project, data["fix_version_id"])
+    new_comps = check_components(db, project, data["component_ids"]) if "component_ids" in data else None
+    new_cf = (validate_custom_fields(db, project, data["custom_fields"], base=issue.custom_fields)
+              if "custom_fields" in data else None)
 
     notify = False
-    for k in _SIMPLE:
+    for k in _SIMPLE + ("start_date", "original_estimate_min", "remaining_estimate_min", "flagged", "archived",
+                        "environment"):
         if k in data and data[k] != getattr(issue, k):
             log_change(db, issue, user, k, getattr(issue, k), data[k])
             setattr(issue, k, data[k])
@@ -438,6 +781,25 @@ def update_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User
         log_change(db, issue, user, "status", old_col.name if old_col else None, new_col.name)
         issue.column_id = new_col.id
         set_resolved(issue, new_col)
+        notify_status(db, project, issue, user, old_col.name if old_col else None, new_col.name)
+    if "fix_version_id" in data and data["fix_version_id"] != issue.fix_version_id:
+        ov = db.get(JiraVersion, issue.fix_version_id) if issue.fix_version_id else None
+        nv = db.get(JiraVersion, data["fix_version_id"]) if data["fix_version_id"] else None
+        log_change(db, issue, user, "fix_version", ov.name if ov else None, nv.name if nv else None)
+        issue.fix_version_id = data["fix_version_id"]
+    if new_comps is not None:
+        old_names = [c.name for c in issue_components(db, issue)]
+        new_names = [c.name for c in new_comps]
+        if old_names != new_names:
+            log_change(db, issue, user, "components", ", ".join(old_names), ", ".join(new_names))
+            set_components(db, issue, new_comps)
+    if new_cf is not None:
+        names = {str(f.id): f.name for f in db.query(JiraCustomField).filter_by(project_id=project.id).all()}
+        old_cf = dict(issue.custom_fields or {})
+        for k in set(old_cf) | set(new_cf):
+            if old_cf.get(k) != new_cf.get(k):
+                log_change(db, issue, user, "cf:" + names.get(k, k), old_cf.get(k), new_cf.get(k))
+        issue.custom_fields = new_cf
     issue.updated_at = now()
     db.flush()
     if notify:
@@ -447,6 +809,7 @@ def update_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User
 def move_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User, column_id: int,
                before_id: int | None, after_id: int | None):
     col = column_in_project(db, project, column_id)
+    check_transition(db, project, issue.column_id, col.id)
     items = (db.query(JiraIssue).filter(JiraIssue.project_id == project.id, JiraIssue.column_id == col.id,
                                         JiraIssue.id != issue.id).order_by(JiraIssue.rank, JiraIssue.id).all())
     rank = compute_rank(items, before_id, after_id)
@@ -455,6 +818,7 @@ def move_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User, 
         log_change(db, issue, user, "status", old_col.name if old_col else None, col.name)
         issue.column_id = col.id
         set_resolved(issue, col)
+        notify_status(db, project, issue, user, old_col.name if old_col else None, col.name)
     issue.rank = rank
     issue.updated_at = now()
     db.flush()
@@ -462,6 +826,8 @@ def move_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User, 
 
 def rank_issue(db: Session, project: JiraProject, issue: JiraIssue, user: User, sprint_id: int | None,
                before_id: int | None, after_id: int | None):
+    if project.board_type == "kanban":
+        sprint_id = None
     if sprint_id != issue.sprint_id:
         check_sprint(db, project, sprint_id)
     q = db.query(JiraIssue).filter(JiraIssue.project_id == project.id, JiraIssue.id != issue.id)
@@ -490,8 +856,11 @@ def delete_issue(db: Session, issue: JiraIssue):
 
 # ------------------------------------------------------------------ querying
 def issue_filters(db: Session, project: JiraProject, user: User, q=None, type=None, status_category=None,
-                  column_id=None, assignee=None, priority=None, label=None, sprint_id=None, parent_id=None):
+                  column_id=None, assignee=None, priority=None, label=None, sprint_id=None, parent_id=None,
+                  include_archived=False):
     query = db.query(JiraIssue).filter(JiraIssue.project_id == project.id)
+    if not include_archived:
+        query = query.filter(JiraIssue.archived.is_(False))
     if q:
         term = q.strip()
         conds = [JiraIssue.title.ilike(f"%{term}%"), JiraIssue.description.ilike(f"%{term}%")]

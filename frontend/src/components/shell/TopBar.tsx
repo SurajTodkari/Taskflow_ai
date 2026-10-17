@@ -5,6 +5,7 @@ import { Avatar } from '../ui/Avatar';
 import { Menu } from '../ui/Menu';
 import ThemeSwitcher from './ThemeSwitcher';
 import NotificationBell from './NotificationBell';
+import { JumpToIssue } from './JiraQuickSearch';
 
 export default function TopBar({ title, user, unread, onMenu, onNewTask, onLogout, search }: { title: string; user: User | null; unread: number; onMenu: () => void; onNewTask: () => void; onLogout: () => void; search: React.ReactNode }) {
   const nav = useNavigate();
@@ -14,6 +15,7 @@ export default function TopBar({ title, user, unread, onMenu, onNewTask, onLogou
       <button className="icon-btn !h-10 !w-10 lg:hidden" aria-label="Open menu" onClick={onMenu}><MenuIcon size={20} /></button>
       <div className="hidden min-w-0 shrink-0 lg:block"><h1 className="truncate text-section">{title}</h1></div>
       <div className="flex min-w-0 flex-1 items-center justify-center lg:px-4">{search}</div>
+      <JumpToIssue />
       <time className="hidden whitespace-nowrap text-sm text-fg-muted md:block" aria-label="Current date">{date}</time>
       <button className="btn-primary !min-h-10 sm:!min-h-9 !px-3" onClick={onNewTask} aria-label="Quick add task (N)"><Plus size={16} /><span className="hidden sm:inline">Add task</span></button>
       <ThemeSwitcher />

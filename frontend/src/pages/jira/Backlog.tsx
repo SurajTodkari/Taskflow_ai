@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Play, CheckCheck, Trash2, ChevronDown, ChevronRight, Layers } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Plus, Play, CheckCheck, Trash2, ChevronDown, ChevronRight, Layers, ListChecks } from 'lucide-react';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import ErrorBanner from '../../components/ErrorBanner';
 import EmptyState from '../../components/EmptyState';
@@ -12,6 +13,7 @@ import type { Issue, JiraSprint } from '../../lib/jiraTypes';
 import { useProjectCtx } from '../../features/jira/ctx';
 import { CompleteSprintModal, CreateSprintModal, QuickCreate, StartSprintModal } from '../../features/jira/dialogs';
 import { useErrToast, useRefreshJira } from '../../features/jira/hooks';
+import BulkBar from '../../features/jira/BulkBar';
 import { DropLine, Points, PriorityIcon, StatusPill, TypeIcon, UserDot, canEdit, dropIndex, isAdmin, neighbours } from '../../features/jira/ui';
 
 type SectionId = number | 'backlog';
@@ -31,6 +33,10 @@ export default function Backlog() {
   const [drag, setDrag] = useState<Issue | null>(null);
   const [over, setOver] = useState<{ sec: SectionId; index: number } | null>(null);
   const [quick, setQuick] = useState<SectionId | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [sel, setSel] = useState<string[]>([]);
+  const [epicFilter, setEpicFilter] = useState('');
+  const versionsQ = useQuery({ queryKey: ['jira', 'versions', project.key], queryFn: () => jiraApi.versions(project.key) });
 
   const qk = ['jira', 'issues', project.key, 'backlog'] as const;
   const q = useQuery({ queryKey: qk, queryFn: () => jiraApi.listIssues(project.key, { limit: 200, sort: 'rank', order: 'asc' }) });
@@ -46,7 +52,9 @@ export default function Backlog() {
     onError: (e) => errToast(e, 'Could not delete sprint'),
   });
 
-  const issues = useMemo(() => (q.data?.items ?? []).filter((i) => i.type !== 'subtask'), [q.data]);
+  const epics = useMemo(() => (q.data?.items ?? []).filter((i) => i.type === 'epic'), [q.data]);
+  const issues = useMemo(() => (q.data?.items ?? []).filter((i) => i.type !== 'subtask' && (!epicFilter || i.parent?.id === Number(epicFilter) || i.id === Number(epicFilter))), [q.data, epicFilter]);
+  const toggleSel = (k: string) => setSel((s) => (s.includes(k) ? s.filter((x) => x !== k) : [...s, k]));
   const sprints = useMemo(() => project.sprints.filter((s) => s.state !== 'closed').sort((a, b) => (a.state === 'active' ? -1 : 0) - (b.state === 'active' ? -1 : 0) || a.id - b.id), [project.sprints]);
   const bySection = (sec: SectionId) => issues.filter((i) => (sec === 'backlog' ? i.sprint_id === null : i.sprint_id === sec));
 
@@ -104,7 +112,7 @@ export default function Backlog() {
               {list.map((i, k) => (
                 <div key={i.id} className="contents">
                   {isOver && drag?.id !== i.id && over.index === list.slice(0, k).filter((x) => x.id !== drag?.id).length && <DropLine />}
-                  <BacklogRow issue={i} dragging={drag?.id === i.id} draggable={editable} onOpen={() => openIssue(i.key)}
+                  <BacklogRow issue={i} dragging={drag?.id === i.id} draggable={editable && !selectMode} selectMode={selectMode} selected={sel.includes(i.key)} onOpen={() => (selectMode ? toggleSel(i.key) : openIssue(i.key))}
                     onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', i.key); setDrag(i); }} onDragEnd={() => { setDrag(null); setOver(null); }} />
                 </div>))}
               {isOver && over.index >= filtered.length && <DropLine />}
@@ -124,8 +132,15 @@ export default function Backlog() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-fg-muted">Drag issues between sprints and the backlog to plan your work.</p>
-        {editable && <button className="btn-ghost" onClick={() => setCreatingSprint(true)}><Layers size={16} />Create sprint</button>}
+        <div className="flex flex-wrap items-center gap-2">
+          <select aria-label="Filter by epic" className="input !w-auto" value={epicFilter} onChange={(e) => setEpicFilter(e.target.value)}><option value="">All epics</option>{epics.map((x) => <option key={x.id} value={x.id}>{x.key} {x.title}</option>)}</select>
+          {editable && <button className={`btn-ghost ${selectMode ? '!border-accent !text-accent' : ''}`} aria-pressed={selectMode} onClick={() => { setSelectMode(!selectMode); setSel([]); }}><ListChecks size={16} />Select</button>}
+          {editable && <button className="btn-ghost" onClick={() => setCreatingSprint(true)}><Layers size={16} />Create sprint</button>}
+        </div>
       </div>
+      {(versionsQ.data ?? []).length > 0 && <details className="card px-4 py-2 text-sm"><summary className="cursor-pointer font-medium">Versions ({(versionsQ.data ?? []).length})</summary>
+        <ul className="mt-2 space-y-1">{(versionsQ.data ?? []).map((v) => <li key={v.id} className="flex items-center gap-2"><span className="font-medium">{v.name}</span><span className="text-xs text-fg-muted">{v.done_count ?? 0}/{v.issue_count ?? 0} done{v.released ? ' · released' : ''}</span></li>)}</ul>
+        <Link className="mt-2 inline-block text-xs text-accent hover:underline" to={`/jira/${project.key}/releases`}>Manage releases</Link></details>}
       {q.error && <ErrorBanner error={q.error} onRetry={() => q.refetch()} />}
       {q.isLoading ? <div className="space-y-3">{[1, 2].map((i) => <Skeleton key={i} className="h-40 w-full rounded-2xl" />)}</div>
         : q.data ? (
@@ -135,6 +150,7 @@ export default function Backlog() {
             {renderSection('backlog', 'Backlog')}
             {q.data.total > q.data.items.length && <p className="text-center text-xs text-fg-muted">Showing the first {q.data.items.length} of {q.data.total} issues. Use the Issues tab to find the rest.</p>}
           </>) : null}
+      {selectMode && sel.length > 0 && <BulkBar project={project} keys={sel} onClear={() => { setSel([]); setSelectMode(false); }} />}
       {startSp && <StartSprintModal sprint={startSp} onClose={() => setStartSp(null)} />}
       {completeSp && <CompleteSprintModal sprint={completeSp} sprints={project.sprints} onClose={() => setCompleteSp(null)} />}
       {creatingSprint && <CreateSprintModal project={project} onClose={() => setCreatingSprint(false)} />}
@@ -143,10 +159,11 @@ export default function Backlog() {
   );
 }
 
-function BacklogRow({ issue, onOpen, draggable, dragging, onDragStart, onDragEnd }: { issue: Issue; onOpen: () => void; draggable: boolean; dragging: boolean; onDragStart: (e: React.DragEvent) => void; onDragEnd: () => void }) {
+function BacklogRow({ issue, onOpen, draggable, dragging, onDragStart, onDragEnd, selectMode, selected }: { selectMode?: boolean; selected?: boolean; issue: Issue; onOpen: () => void; draggable: boolean; dragging: boolean; onDragStart: (e: React.DragEvent) => void; onDragEnd: () => void }) {
   return (
     <div data-card data-issue-id={issue.id} draggable={draggable} onDragStart={onDragStart} onDragEnd={onDragEnd} role="button" tabIndex={0} onClick={onOpen} onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}
-      className={`flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-2 text-sm transition hover:border-accent/50 ${draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} ${dragging ? 'opacity-40' : ''}`}>
+      className={`flex flex-wrap items-center gap-2 rounded-lg border bg-surface px-2.5 py-2 text-sm transition hover:border-accent/50 ${selected ? 'border-accent ring-1 ring-accent/40' : 'border-line'} ${draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} ${dragging ? 'opacity-40' : ''}`}>
+      {selectMode && <input type="checkbox" tabIndex={-1} readOnly checked={!!selected} aria-label={`Select ${issue.key}`} className="h-4 w-4 accent-[rgb(var(--accent))]" />}
       <CompactIssue issue={issue} />
     </div>
   );
@@ -157,6 +174,8 @@ function CompactIssue({ issue }: { issue: Issue }) {
     <>
       <TypeIcon type={issue.type} />
       <span className="text-xs font-medium text-fg-muted">{issue.key}</span>
+      {issue.flagged && <span className="text-caption font-medium text-danger">Flagged</span>}
+      {issue.blocked && <span className="text-caption font-medium text-danger">Blocked</span>}
       <span className={`min-w-0 flex-1 truncate ${issue.status_category === 'done' ? 'text-fg-muted line-through' : ''}`}>{issue.title}</span>
       {issue.parent?.type === 'epic' && <span className="hidden max-w-32 truncate rounded bg-violet-500/15 px-1.5 text-caption text-violet-600 sm:inline dark:text-violet-300" title={issue.parent.title}>{issue.parent.title}</span>}
       <StatusPill name={issue.status_name} category={issue.status_category} />

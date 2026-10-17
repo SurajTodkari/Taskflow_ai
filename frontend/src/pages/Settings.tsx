@@ -13,7 +13,7 @@ import { SkeletonList } from '../components/Skeleton';
 import { useToast } from '../components/Toast';
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const NOTIFY: ['notify_morning' | 'notify_evening' | 'notify_tomorrow' | 'notify_reminders' | 'notify_overdue', string][] = [['notify_morning', 'Morning summary'], ['notify_evening', 'Evening summary'], ['notify_tomorrow', 'Tomorrow preview'], ['notify_reminders', 'Task reminders'], ['notify_overdue', 'Overdue alerts']];
+const NOTIFY: ['notify_morning' | 'notify_evening' | 'notify_tomorrow' | 'notify_reminders' | 'notify_overdue' | 'jira_email_notifications', string][] = [['jira_email_notifications', 'Email me about Jira invites, assignments and mentions (if email is enabled)'], ['notify_morning', 'Morning summary'], ['notify_evening', 'Evening summary'], ['notify_tomorrow', 'Tomorrow preview'], ['notify_reminders', 'Task reminders'], ['notify_overdue', 'Overdue alerts']];
 const hhmm = (v: string) => (v ?? '').slice(0, 5);
 const time = z.string().regex(/^\d{2}:\d{2}$/, 'Use HH:MM');
 const schema = z.object({
@@ -23,7 +23,7 @@ const schema = z.object({
   work_start: time, work_end: time, morning_time: time, evening_time: time, tomorrow_time: time,
   default_reminder_minutes: z.coerce.number().int().min(0, 'Min 0').max(10080, 'Max 10080'),
   weekend_days: z.array(z.number()),
-  notify_morning: z.boolean(), notify_evening: z.boolean(), notify_tomorrow: z.boolean(), notify_reminders: z.boolean(), notify_overdue: z.boolean(),
+  notify_morning: z.boolean(), notify_evening: z.boolean(), notify_tomorrow: z.boolean(), notify_reminders: z.boolean(), notify_overdue: z.boolean(), jira_email_notifications: z.boolean().optional(),
   defaultsText: z.string().refine((v) => { try { JSON.parse(v || '{}'); return true; } catch { return false; } }, 'Must be valid JSON'),
 }).refine((v) => v.work_end > v.work_start, { path: ['work_end'], message: 'Must be after work start' });
 type F = z.input<typeof schema>;
@@ -55,7 +55,7 @@ export default function Settings() {
   const tzs = useMemo(() => { const z = zones(); return tz && !z.includes(tz) ? [tz, ...z] : z; }, [tz]);
   useEffect(() => {
     const d = q.data; if (!d) return;
-    reset({ ...d, morning_time: hhmm(d.morning_time), evening_time: hhmm(d.evening_time), tomorrow_time: hhmm(d.tomorrow_time), work_start: hhmm(d.work_start), work_end: hhmm(d.work_end), defaultsText: JSON.stringify(d.recurring_defaults ?? {}, null, 2) });
+    reset({ ...d, jira_email_notifications: d.jira_email_notifications ?? true, morning_time: hhmm(d.morning_time), evening_time: hhmm(d.evening_time), tomorrow_time: hhmm(d.tomorrow_time), work_start: hhmm(d.work_start), work_end: hhmm(d.work_end), defaultsText: JSON.stringify(d.recurring_defaults ?? {}, null, 2) });
   }, [q.data, reset]);
   useEffect(() => { getPushState().then(setPush).catch(() => setPush('unsupported')); }, []);
   const save = useMutation({

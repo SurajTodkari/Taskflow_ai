@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
+import { notifIssuePath } from '../components/shell/JiraQuickSearch';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { BellRing, Check, CheckCheck, Info, Settings as Cog, Send, ShieldAlert } from 'lucide-react';
 import { api } from '../lib/api';
@@ -70,6 +71,7 @@ export default function Notifications() {
             {!r && <span className="sr-only">Unread</span>}
           </div>
           {(n.body || n.message) && <p className="mt-0.5 text-sm text-fg-muted">{n.body || n.message}</p>}
+          {notifIssuePath(n) && <Link to={notifIssuePath(n) as string} className="mt-1 inline-block text-sm font-medium text-accent hover:underline">Open issue</Link>}
           <p className="mt-1 text-caption text-fg-muted">{when(n).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</p>
         </div>
         {!r ? <button className="icon-btn" aria-label="Mark as read" title="Mark as read" onClick={() => read.mutate(n.id)}><Check size={16} /></button> : null}

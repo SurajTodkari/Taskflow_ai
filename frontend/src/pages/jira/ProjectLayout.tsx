@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState, type ComponentType } from 'react';
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Plus, ChevronLeft } from 'lucide-react';
 import ErrorBanner from '../../components/ErrorBanner';
@@ -15,12 +15,14 @@ import Backlog from './Backlog';
 import Issues from './Issues';
 import Summary from './Summary';
 import ProjectSettings from './ProjectSettings';
+import { Activity, Filters, Releases, Reports, Roadmap } from './lazy';
 
 const TABS = [
   { id: 'board', label: 'Board' }, { id: 'backlog', label: 'Backlog' }, { id: 'issues', label: 'Issues' },
+  { id: 'roadmap', label: 'Roadmap' }, { id: 'releases', label: 'Releases' }, { id: 'reports', label: 'Reports' }, { id: 'activity', label: 'Activity' }, { id: 'filters', label: 'Filters' },
   { id: 'summary', label: 'Summary' }, { id: 'settings', label: 'Settings' },
 ];
-const PAGES: Record<string, () => JSX.Element | null> = { board: Board, backlog: Backlog, issues: Issues, summary: Summary, settings: ProjectSettings };
+const PAGES: Record<string, ComponentType> = { board: Board, backlog: Backlog, issues: Issues, summary: Summary, settings: ProjectSettings, roadmap: Roadmap, releases: Releases, reports: Reports, activity: Activity, filters: Filters };
 
 export default function ProjectLayout() {
   const { key = '', issueKey } = useParams();
@@ -28,6 +30,11 @@ export default function ProjectLayout() {
   const nav = useNavigate();
   const q = useProject(key);
   const [creating, setCreating] = useState<CreateDefaults | null>(null);
+  useEffect(() => {
+    const h = () => setCreating({});
+    window.addEventListener('jira:create-issue', h);
+    return () => window.removeEventListener('jira:create-issue', h);
+  }, []);
   const seg = loc.pathname.split('/')[3] ?? '';
   const bgState = (loc.state as { bg?: string } | null)?.bg;
   const tab = seg === 'issue' ? (bgState && PAGES[bgState] ? bgState : 'issues') : seg;
@@ -58,15 +65,16 @@ export default function ProjectLayout() {
             <Link to="/jira" className="inline-flex items-center gap-1 text-xs text-fg-muted hover:text-fg"><ChevronLeft size={14} />Projects</Link>
             <h1 className="flex items-center gap-2 text-page font-semibold"><span className="rounded-lg bg-accent-soft px-2 py-0.5 text-sm font-bold text-accent">{p.key}</span><span className="truncate">{p.name}</span></h1>
           </div>
-          {canEdit(p.my_role) && <button className="btn-primary" onClick={() => setCreating({})}><Plus size={16} />Create issue</button>}
+          {canEdit(p.my_role) && !p.archived && <button className="btn-primary" onClick={() => setCreating({})}><Plus size={16} />Create issue</button>}
         </div>
         <nav aria-label="Project sections" className="-mx-1 flex gap-1 overflow-x-auto border-b border-line px-1">
-          {TABS.map((t) => (
+          {TABS.filter((t) => !(t.id === 'backlog' && p.board_type === 'kanban')).map((t) => (
             <NavLink key={t.id} to={`/jira/${p.key}/${t.id}`} className={() => `relative whitespace-nowrap px-3 py-2.5 text-sm font-medium transition-colors ${tab === t.id ? 'text-accent' : 'text-fg-muted hover:text-fg'}`}>
               {t.label}{tab === t.id && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-accent" />}
             </NavLink>))}
         </nav>
-        {issueKey && Page ? <Page /> : <Outlet />}
+        {p.archived && <p role="status" className="rounded-xl border border-line bg-surface-2 px-4 py-2 text-sm text-fg-muted">This project is archived and read-only.</p>}
+        <Suspense fallback={<Skeleton className="h-64 w-full rounded-2xl" />}>{issueKey && Page ? <Page /> : <Outlet />}</Suspense>
         {issueKey && <IssueDetailModal issueKey={issueKey} project={p} onClose={closeIssue} />}
         {creating && <CreateIssueModal project={p} defaults={creating} onClose={() => setCreating(null)} onCreated={() => undefined} />}
       </div>

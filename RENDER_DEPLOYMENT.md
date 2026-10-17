@@ -50,3 +50,9 @@
 - **Uploads vanish**: ephemeral disk; add persistent disk or object storage.
 - **Database errors on first request**: Neon compute was paused; retry after a few seconds.
 - **Cost**: everything above is free-tier; `ANTHROPIC_API_KEY` is optional and is the only thing that would incur usage charges (AI features fall back to rules without it).
+
+## Jira module v2 notes (free tier)
+- **Migration `0003_jira_v2`** runs with the normal `alembic upgrade head` on deploy (invites, links, watchers, components, versions, worklogs, attachments, filters, workflow, custom fields).
+- **Attachments are stored in the database** (`jira_attachments.data`), so they survive Render's ephemeral disk. Limits: 2 MB per file, 10 files per issue, extension allow-list. On Neon free (0.5 GB) 250 maxed-out attachments would fill the database; delete old attachments or watch usage in the Neon console. Attachment bytes are never loaded by list queries.
+- **Optional email** (off unless `SMTP_HOST` is set), via any SMTP provider with a free tier: `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TLS` (default 1; port 465 uses implicit TLS). Plain-text mails are sent from a daemon thread for: project invites (also to not-yet-registered addresses), assignment, and @mentions. Failures are logged and never affect requests. Users can opt out with `jira_email_notifications` in `/api/settings`.
+- Search uses a built-in JQL-lite parser compiled to parameterised SQLAlchemy queries (no extra dependencies, works on SQLite and Postgres).

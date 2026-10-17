@@ -102,7 +102,7 @@ export interface Settings {
   default_reminder_minutes: number; theme: 'light' | 'dark' | 'system';
   work_start: string; work_end: string; weekend_days: number[];
   notify_morning: boolean; notify_evening: boolean; notify_tomorrow: boolean;
-  notify_reminders: boolean; notify_overdue: boolean;
+  notify_reminders: boolean; notify_overdue: boolean; jira_email_notifications?: boolean;
   recurring_defaults: Record<string, unknown>;
 }
 

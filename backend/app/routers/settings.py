@@ -13,7 +13,8 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 TIME_FIELDS = ("morning_time", "evening_time", "tomorrow_time", "work_start", "work_end")
 PLAIN = ("timezone", "default_reminder_minutes", "theme", "weekend_days", "notify_morning", "notify_evening",
-         "notify_tomorrow", "notify_reminders", "notify_overdue", "recurring_defaults")
+         "notify_tomorrow", "notify_reminders", "notify_overdue", "recurring_defaults",
+         "jira_email_notifications")
 
 
 def settings_out(user: User, p) -> dict:
