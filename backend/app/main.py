@@ -21,6 +21,10 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("taskflow")
 
+if os.environ.get("RENDER") and settings.DATABASE_URL.startswith("sqlite"):
+    log.error("DATABASE_URL is not set: using ephemeral SQLite. All users/tasks are LOST on every "
+              "redeploy/restart. Create a Render Postgres and set DATABASE_URL on this service.")
+
 app = FastAPI(title="TaskFlow AI API", version="1.0.0")
 app.state.limiter = limiter
 
