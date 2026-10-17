@@ -1,0 +1,44 @@
+# Local development only. Credentials below are throwaway local defaults.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: taskflow
+      POSTGRES_PASSWORD: taskflow
+      POSTGRES_DB: taskflow
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow"]
+      interval: 5s
+      retries: 10
+  api:
+    build: ./backend
+    env_file: [{ path: ./backend/.env, required: false }]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://taskflow:taskflow@db:5432/taskflow
+      CORS_ORIGINS: http://localhost:5173
+      UPLOAD_DIR: /data/uploads
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    volumes: [uploads:/data/uploads]
+    ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+  worker:
+    build: ./backend
+    env_file: [{ path: ./backend/.env, required: false }]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://taskflow:taskflow@db:5432/taskflow
+    # emulates the every-minute cron
+    command: sh -c "while true; do python -m app.worker; sleep 60; done"
+    depends_on: [api]
+  web:
+    image: node:20-alpine
+    working_dir: /app
+    volumes: [./frontend:/app]
+    environment:
+      VITE_API_URL: http://localhost:8000
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    ports: ["5173:5173"]
+volumes:
+  pgdata:
+  uploads:
