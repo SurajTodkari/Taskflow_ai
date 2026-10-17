@@ -347,8 +347,8 @@ def reschedule_task(db: Session, user: User, prefs, t: Task, data: dict) -> Task
     patch = {k: v for k, v in data.items() if v is not None and k in DATE_FIELDS}
     if not patch:
         raise TaskError(422, "Provide at least one of start_date, due_date, start_time, end_time")
-    today = date.today()
-    return update_task(db, user, prefs, t, patch, today)
+    from ..deps import user_today
+    return update_task(db, user, prefs, t, patch, user_today(prefs))
 
 
 def add_to_today(db: Session, user: User, t: Task, today: date) -> Task:

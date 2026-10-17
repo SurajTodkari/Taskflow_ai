@@ -21,6 +21,8 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("taskflow")
 
+if os.environ.get("RENDER") and settings.SECRET_KEY.startswith("dev-secret"):
+    raise RuntimeError("SECRET_KEY is not set. Set a long random SECRET_KEY env var on this service.")
 if os.environ.get("RENDER") and settings.DATABASE_URL.startswith("sqlite"):
     log.error("DATABASE_URL is not set: using ephemeral SQLite. All users/tasks are LOST on every "
               "redeploy/restart. Create a Render Postgres and set DATABASE_URL on this service.")
@@ -101,15 +103,17 @@ _static = Path(os.environ.get("STATIC_DIR", Path(__file__).resolve().parent.pare
 if (_static / "index.html").is_file():
     _index = _static / "index.html"
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def spa(full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         f = (_static / full_path).resolve()
         if full_path and f.is_file() and _static.resolve() in f.parents:
-            return FileResponse(f)
-        return FileResponse(_index)
+            # hashed assets are immutable; sw.js and other root files must always revalidate
+            cache = "public, max-age=31536000, immutable" if full_path.startswith("assets/") else "no-cache"
+            return FileResponse(f, headers={"Cache-Control": cache})
+        return FileResponse(_index, headers={"Cache-Control": "no-cache"})
 else:
-    @app.get("/", include_in_schema=False)
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     def root():
         return {"name": "TaskFlow AI API", "docs": "/docs", "health": "/health"}

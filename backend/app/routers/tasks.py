@@ -337,7 +337,7 @@ def timer_start(task_id: int, user: User = Depends(get_current_user), db: Sessio
         e.seconds = max(0, int((now - svc.aware(e.started_at)).total_seconds()))
     db.add(TimeEntry(user_id=user.id, task_id=t.id, started_at=now, seconds=0))
     if t.status == "not_started":
-        svc.update_task(db, user, get_prefs(db, user), t, {"status": "in_progress"}, date.today())
+        svc.update_task(db, user, get_prefs(db, user), t, {"status": "in_progress"}, user_today(get_prefs(db, user)))
     svc.log_activity(db, t.id, user.id, "timer_started", {})
     return _commit_out(db, user, t)
 
